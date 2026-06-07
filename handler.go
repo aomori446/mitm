@@ -119,12 +119,14 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 		}
 		
 		// OnRequest hooks
-		if resp := h.runRequestHooks(req); resp != nil {
-			_ = resp.Write(tlsDownstream)
+		newReq, newResp := h.runRequestHooks(req)
+		if newResp != nil {
+			newResp.Write(tlsDownstream)
+			newResp.Body.Close()
 			continue
 		}
 		
-		resp, err := h.mitmRoundTrip(req, dstAddr)
+		resp, err := h.mitmRoundTrip(newReq, dstAddr)
 		if err != nil {
 			slog.Error("MITM round trip failed", "error", err)
 			errResp := interceptor.Response(http.StatusBadGateway, "", http.NoBody)
@@ -133,8 +135,9 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 		}
 		
 		// OnResponse hooks
-		if hookResp := h.runResponseHooks(resp); hookResp != nil {
-			resp = hookResp
+		resp, err = h.runResponseHooks(resp)
+		if err != nil {
+			slog.Error("response hook aborted the chain", "error", err)
 		}
 		
 		err = resp.Write(tlsDownstream)
@@ -186,25 +189,26 @@ func (h *Handler) mitmRoundTrip(req *http.Request, dstAddr string) (*http.Respon
 	return resp, nil
 }
 
-// runRequestHooks runs OnRequest hooks in registration order.
-// Returns the first non-nil response to short-circuit the request,
-// or nil if all hooks passed through.
-func (h *Handler) runRequestHooks(req *http.Request) *http.Response {
+func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Response) {
 	for _, fn := range h.onRequest {
-		if resp := fn(req); resp != nil {
-			return resp
+		newReq, newResp := fn(req)
+		if newResp != nil {
+			return nil, newResp
 		}
+		req = newReq
 	}
-	return nil
+	return req, nil
 }
 
-func (h *Handler) runResponseHooks(resp *http.Response) *http.Response {
+func (h *Handler) runResponseHooks(resp *http.Response) (*http.Response, error) {
 	for _, fn := range h.onResponse {
-		if resp = fn(resp); resp != nil {
-			return resp
+		newResp, err := fn(resp)
+		if err != nil {
+			return newResp, err
 		}
+		resp = newResp
 	}
-	return nil
+	return resp, nil
 }
 
 type halfCloser interface {

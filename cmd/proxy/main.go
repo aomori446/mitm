@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,8 +20,6 @@ import (
 )
 
 func main() {
-	slog.SetLogLoggerLevel(slog.LevelDebug)
-	
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	defer stop()
 	
@@ -33,7 +30,7 @@ func main() {
 	
 	handler := mitm.New(ctx, certMgr)
 	
-	server := &http.Server{Addr: ":8081", Handler: handler}
+	server := &http.Server{Addr: ":8080", Handler: handler}
 	
 	go func() {
 		<-ctx.Done()
