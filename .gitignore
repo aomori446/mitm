@@ -1,3 +1,5 @@
 .idea/
 certs/
 mitm.iml
+.DS_Store
+**/.DS_Store
