@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"sync"
+	"time"
 	
 	"github.com/aomori446/mitm/cert"
 	"github.com/aomori446/mitm/interceptor"
@@ -25,49 +27,78 @@ type Handler struct {
 	httpProxy  *httputil.ReverseProxy
 	onRequest  []interceptor.OnRequestFunc
 	onResponse []interceptor.OnResponseFunc
+	
+	// transports caches one *http.Transport per dstAddr so that upstream
+	// TLS connections are reused across CONNECT sessions to the same host.
+	transports sync.Map
 }
 
 // New creates a Handler. Providing a non-nil certMgr enables TLS interception;
 // passing nil falls back to a transparent TCP relay for CONNECT tunnels.
 func New(ctx context.Context, certMgr *cert.Manager) *Handler {
-	return &Handler{
+	h := &Handler{
 		ctx:     ctx,
 		certMgr: certMgr,
-		httpProxy: &httputil.ReverseProxy{
-			Rewrite: func(preq *httputil.ProxyRequest) {
-				preq.Out.URL.Scheme = "http"
-				preq.Out.URL.Host = preq.In.Host
-			},
+	}
+	h.httpProxy = &httputil.ReverseProxy{
+		Rewrite: func(preq *httputil.ProxyRequest) {
+			preq.Out.URL.Scheme = "http"
+			preq.Out.URL.Host = preq.In.Host
+		},
+		// ModifyResponse runs OnResponse hooks for plain-HTTP traffic.
+		ModifyResponse: func(resp *http.Response) error {
+			newResp, err := h.runResponseHooks(resp)
+			if err != nil {
+				return err
+			}
+			*resp = *newResp
+			return nil
 		},
 	}
+	return h
 }
 
-// HandleRequest registers fn as a request interceptor hook.
+// OnRequest registers fn as a request interceptor hook.
 // Hooks are called in registration order before each upstream request.
-func (h *Handler) HandleRequest(fn interceptor.OnRequestFunc) {
+func (h *Handler) OnRequest(fn interceptor.OnRequestFunc) {
 	h.onRequest = append(h.onRequest, fn)
 }
 
-// HandleResponse registers fn as a response interceptor hook.
+// OnResponse registers fn as a response interceptor hook.
 // Hooks are called in registration order after each upstream response.
-func (h *Handler) HandleResponse(fn interceptor.OnResponseFunc) {
+func (h *Handler) OnResponse(fn interceptor.OnResponseFunc) {
 	h.onResponse = append(h.onResponse, fn)
 }
 
 // ServeHTTP implements [http.Handler]. CONNECT requests initiate a tunnel;
-// all other methods are proxied directly via the reverse proxy.
+// all other methods run OnRequest hooks then are proxied via the reverse proxy.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodConnect {
 		h.handleCONNECT(w, req.Host)
-	} else {
-		h.httpProxy.ServeHTTP(w, req)
+		return
 	}
+	
+	// OnRequest hooks — a non-nil newResp short-circuits the upstream request.
+	newReq, newResp := h.runRequestHooks(req)
+	if newResp != nil {
+		defer newResp.Body.Close()
+		for k, v := range newResp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(newResp.StatusCode)
+		io.Copy(w, newResp.Body)
+		
+		return
+	}
+	
+	h.httpProxy.ServeHTTP(w, newReq)
 }
 
 func (h *Handler) handleCONNECT(w http.ResponseWriter, dstAddr string) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Proxy error: hijacking not supported", http.StatusInternalServerError)
+		slog.Error("Hijacking not supported by ResponseWriter")
 		return
 	}
 	downstream, _, err := hijacker.Hijack()
@@ -111,12 +142,25 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 	}
 	defer tlsDownstream.Close()
 	
+	hostname, _, err := net.SplitHostPort(dstAddr)
+	if err != nil {
+		slog.Error("Failed to parse dstAddr", "addr", dstAddr, "error", err)
+		return
+	}
+	
+	transport := h.transportFor(dstAddr, hostname)
+	
 	br := bufio.NewReader(tlsDownstream)
 	for {
 		req, err := http.ReadRequest(br)
 		if err != nil {
 			break
 		}
+		
+		// http.Transport.RoundTrip requires a fully-qualified URL and empty RequestURI.
+		req.URL.Scheme = "https"
+		req.URL.Host = dstAddr
+		req.RequestURI = ""
 		
 		// OnRequest hooks
 		newReq, newResp := h.runRequestHooks(req)
@@ -126,7 +170,7 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 			continue
 		}
 		
-		resp, err := h.mitmRoundTrip(newReq, dstAddr)
+		resp, err := transport.RoundTrip(newReq)
 		if err != nil {
 			slog.Error("MITM round trip failed", "error", err)
 			errResp := interceptor.Response(http.StatusBadGateway, "", http.NoBody)
@@ -138,6 +182,8 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 		resp, err = h.runResponseHooks(resp)
 		if err != nil {
 			slog.Error("response hook aborted the chain", "error", err)
+			resp.Body.Close()
+			break
 		}
 		
 		err = resp.Write(tlsDownstream)
@@ -148,45 +194,32 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 	}
 }
 
-func (h *Handler) mitmRoundTrip(req *http.Request, dstAddr string) (*http.Response, error) {
-	upstream, err := net.Dial("tcp", dstAddr)
-	if err != nil {
-		return nil, err
-	}
-	
-	hostname, _, err := net.SplitHostPort(dstAddr)
-	if err != nil {
-		return nil, err
-	}
-	
-	tlsUpstream := tls.Client(upstream, &tls.Config{
-		ServerName: hostname,
+// transportFor returns the shared [http.Transport] for dstAddr, creating one if needed.
+func (h *Handler) transportFor(dstAddr, hostname string) *http.Transport {
+	v, _ := h.transports.LoadOrStore(dstAddr, &http.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := net.Dial("tcp", dstAddr)
+			if err != nil {
+				return nil, err
+			}
+			tlsConn := tls.Client(conn, &tls.Config{
+				ServerName: hostname,
+				NextProtos: []string{"http/1.1"},
+			})
+			if err = tlsConn.Handshake(); err != nil {
+				tlsConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+		// Disable automatic gzip so the client controls content negotiation.
+		DisableCompression: true,
+		// Avoid hanging forever if the upstream is slow to respond.
+		ResponseHeaderTimeout: 30 * time.Second,
+		// Allow more idle connections per host for sessions with many parallel resources.
+		MaxIdleConnsPerHost: 10,
 	})
-	
-	if err = tlsUpstream.Handshake(); err != nil {
-		tlsUpstream.Close()
-		return nil, err
-	}
-	
-	if err = req.Write(tlsUpstream); err != nil {
-		tlsUpstream.Close()
-		return nil, err
-	}
-	
-	resp, err := http.ReadResponse(bufio.NewReader(tlsUpstream), req)
-	if err != nil {
-		tlsUpstream.Close()
-		return nil, err
-	}
-	
-	resp.Body = struct {
-		io.Reader
-		io.Closer
-	}{
-		Reader: resp.Body,
-		Closer: tlsUpstream,
-	}
-	return resp, nil
+	return v.(*http.Transport)
 }
 
 func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Response) {
@@ -216,7 +249,7 @@ type halfCloser interface {
 }
 
 // TCPRelay bidirectionally copies data between client and server until either
-// side closes the connection or ctx is cancelled.
+// side closes the connection or ctx is canceled.
 func TCPRelay(ctx context.Context, client, server net.Conn) error {
 	var errGroup errgroup.Group
 	
