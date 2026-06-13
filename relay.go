@@ -37,7 +37,6 @@ func TCPRelay(ctx context.Context, client, server net.Conn) error {
 		return ctx.Err()
 	})
 
-	// server → client
 	errGroup.Go(func() error {
 		_, err := io.Copy(client, server)
 		if conn, ok := client.(halfCloser); ok {
@@ -49,7 +48,6 @@ func TCPRelay(ctx context.Context, client, server net.Conn) error {
 		return err
 	})
 
-	// client → server
 	errGroup.Go(func() error {
 		_, err := io.Copy(server, client)
 		if conn, ok := server.(halfCloser); ok {
@@ -64,9 +62,8 @@ func TCPRelay(ctx context.Context, client, server net.Conn) error {
 	return errGroup.Wait()
 }
 
-// writeErrorToConn writes a minimal HTTP error response directly to a raw connection.
-// This is used after a CONNECT tunnel is established (when http.ResponseWriter is no
-// longer available) to signal errors to the client instead of silently closing.
+// writeErrorToConn writes a minimal HTTP error response to a raw connection.
+// Used after hijacking when http.ResponseWriter is no longer available.
 func writeErrorToConn(conn net.Conn, status int) {
 	resp := interceptor.Response(status, "", http.NoBody)
 	resp.Write(conn)

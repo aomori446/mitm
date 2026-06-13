@@ -1,9 +1,4 @@
-// Command proxy is a reference implementation of a MITM HTTP/HTTPS proxy
-// built on top of github.com/aomori446/mitm.
-//
-// Usage:
-//
-//	go run ./cmd/proxy -ca-cert certs/ca.crt -ca-key certs/ca.key
+// Command proxy is a MITM HTTP/HTTPS proxy built on top of github.com/aomori446/mitm.
 package main
 
 import (
@@ -11,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,9 +30,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	handler := mitm.New(ctx, certMgr)
+	handler := mitm.New(certMgr)
 
-	server := &http.Server{Addr: *addr, Handler: handler}
+	server := &http.Server{
+		Addr:    *addr,
+		Handler: handler,
+		// BaseContext ensures req.Context() is derived from the signal context,
+		// so CONNECT tunnels are torn down promptly on shutdown.
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
 
 	go func() {
 		<-ctx.Done()
