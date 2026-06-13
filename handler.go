@@ -188,7 +188,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 			break
 		}
 		
-		resp, err = h.runResponseHooks(ctx, resp)
+		resp, err = h.runResponseHooks(resp.Request.Context(), resp)
 		if err != nil {
 			slog.Error("response hook aborted the chain", "error", err)
 			resp.Body.Close()
