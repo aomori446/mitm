@@ -1,4 +1,12 @@
-// Command proxy is a minimal MITM HTTP/HTTPS proxy built on github.com/aomori446/mitm.
+// Command logger demonstrates how to attach the Logger interceptor to a
+// MITM proxy to log every proxied request and response.
+//
+// Each request line includes the method and URL.
+// Each response line includes the status code, content-type, elapsed time, and URL.
+//
+// Usage:
+//
+//	go run ./examples/logger -ca-cert certs/ca.crt -ca-key certs/ca.key
 package main
 
 import (
@@ -6,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +23,7 @@ import (
 
 	"github.com/aomori446/mitm"
 	"github.com/aomori446/mitm/cert"
+	"github.com/aomori446/mitm/interceptor"
 )
 
 func main() {
@@ -32,11 +42,14 @@ func main() {
 
 	handler := mitm.New(certMgr)
 
+	// Attach the Logger interceptor.
+	onReq, onResp := interceptor.Logger(slog.Default())
+	handler.OnRequest(onReq)
+	handler.OnResponse(onResp)
+
 	server := &http.Server{
 		Addr:    *addr,
 		Handler: handler,
-		// BaseContext ensures req.Context() is derived from the signal context,
-		// so CONNECT tunnels are torn down promptly on shutdown.
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
