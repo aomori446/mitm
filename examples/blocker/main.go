@@ -1,6 +1,4 @@
-// Command blocker demonstrates how to block specific hosts using the
-// Blocker interceptor. Requests to matched hosts receive a 403 Forbidden
-// response instead of being forwarded upstream.
+// Command blocker demonstrates the Blocker interceptor with various response helpers.
 //
 // Usage:
 //
@@ -16,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/aomori446/mitm"
@@ -39,10 +38,20 @@ func main() {
 
 	handler := mitm.New(certMgr)
 
-	// Block exact hosts and wildcard subdomains.
-	handler.OnRequest(interceptor.Blocker(
+	// Block ad hosts by pattern, returning a content-appropriate empty response
+	// (pixel for images, empty JS for scripts, etc.) instead of 403.
+	handler.OnRequest(interceptor.BlockerWith(
+		interceptor.RespondWithAuto(),
 		"ads.example.com",
-		"*.tracking.io",
+		"*.doubleclick.net",
+	))
+
+	// Block by custom match function — useful when host patterns are not enough.
+	handler.OnRequest(interceptor.BlockerFunc(
+		interceptor.RespondWithEmptyJS(),
+		func(req *http.Request) bool {
+			return strings.HasSuffix(req.URL.Path, "/analytics.js")
+		},
 	))
 
 	server := &http.Server{
