@@ -11,10 +11,9 @@ import (
 	"net/http/httputil"
 	"sync"
 	"time"
-	
+
 	"github.com/aomori446/mitm/cert"
 	"github.com/aomori446/mitm/interceptor"
-	"golang.org/x/sync/errgroup"
 )
 
 // Handler is an [http.Handler] that acts as a forward proxy and performs
@@ -47,7 +46,7 @@ func New(ctx context.Context, certMgr *cert.Manager) *Handler {
 		},
 		// ModifyResponse runs OnResponse hooks for plain-HTTP traffic.
 		ModifyResponse: func(resp *http.Response) error {
-			newResp, err := h.runResponseHooks(resp)
+			newResp, err := h.runResponseHooks(resp.Request.Context(), resp)
 			if err != nil {
 				return err
 			}
@@ -79,7 +78,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	
 	// OnRequest hooks — a non-nil newResp short-circuits the upstream request.
-	newReq, newResp := h.runRequestHooks(req)
+	newReq, newResp := h.runRequestHooks(req.Context(), req)
 	if newResp != nil {
 		defer newResp.Body.Close()
 		for k, v := range newResp.Header {
@@ -125,10 +124,11 @@ func (h *Handler) handleCONNECTWithoutMITM(downstream net.Conn, dstAddr string) 
 	upstream, err := net.Dial("tcp", dstAddr)
 	if err != nil {
 		slog.Error("Dial failed", "error", err)
+		writeErrorToConn(downstream, http.StatusBadGateway)
 		return
 	}
 	defer upstream.Close()
-	
+
 	if err = TCPRelay(h.ctx, downstream, upstream); err != nil {
 		slog.Error("Relay failed", "error", err)
 	}
@@ -138,6 +138,7 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 	tlsDownstream := tls.Server(downstream, h.certMgr.TLSConfig())
 	if err := tlsDownstream.Handshake(); err != nil {
 		slog.Error("TLS handshake with client failed", "addr", downstream.RemoteAddr().String(), "error", err)
+		writeErrorToConn(downstream, http.StatusBadGateway)
 		return
 	}
 	defer tlsDownstream.Close()
@@ -163,7 +164,7 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 		req.RequestURI = ""
 		
 		// OnRequest hooks
-		newReq, newResp := h.runRequestHooks(req)
+		newReq, newResp := h.runRequestHooks(h.ctx, req)
 		if newResp != nil {
 			newResp.Write(tlsDownstream)
 			newResp.Body.Close()
@@ -179,10 +180,12 @@ func (h *Handler) handleCONNECTWithMITM(downstream net.Conn, dstAddr string) {
 		}
 		
 		// OnResponse hooks
-		resp, err = h.runResponseHooks(resp)
+		resp, err = h.runResponseHooks(h.ctx, resp)
 		if err != nil {
 			slog.Error("response hook aborted the chain", "error", err)
 			resp.Body.Close()
+			errResp := interceptor.Response(http.StatusBadGateway, "", http.NoBody)
+			errResp.Write(tlsDownstream)
 			break
 		}
 		
@@ -222,9 +225,9 @@ func (h *Handler) transportFor(dstAddr, hostname string) *http.Transport {
 	return v.(*http.Transport)
 }
 
-func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Response) {
+func (h *Handler) runRequestHooks(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {
 	for _, fn := range h.onRequest {
-		newReq, newResp := fn(req)
+		newReq, newResp := fn(ctx, req)
 		if newResp != nil {
 			return nil, newResp
 		}
@@ -233,9 +236,9 @@ func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Respo
 	return req, nil
 }
 
-func (h *Handler) runResponseHooks(resp *http.Response) (*http.Response, error) {
+func (h *Handler) runResponseHooks(ctx context.Context, resp *http.Response) (*http.Response, error) {
 	for _, fn := range h.onResponse {
-		newResp, err := fn(resp)
+		newResp, err := fn(ctx, resp)
 		if err != nil {
 			return newResp, err
 		}
@@ -244,56 +247,4 @@ func (h *Handler) runResponseHooks(resp *http.Response) (*http.Response, error) 
 	return resp, nil
 }
 
-type halfCloser interface {
-	CloseWrite() error
-}
 
-// TCPRelay bidirectionally copies data between client and server until either
-// side closes the connection or ctx is canceled.
-func TCPRelay(ctx context.Context, client, server net.Conn) error {
-	var errGroup errgroup.Group
-	
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	
-	halfClosed := make(chan struct{}, 2)
-	defer close(halfClosed)
-	go func() {
-		<-halfClosed
-		<-halfClosed
-		cancel()
-	}()
-	
-	errGroup.Go(func() error {
-		<-ctx.Done()
-		client.Close()
-		server.Close()
-		return ctx.Err()
-	})
-	
-	// server → client
-	errGroup.Go(func() error {
-		_, err := io.Copy(client, server)
-		if conn, ok := client.(halfCloser); ok {
-			conn.CloseWrite()
-		} else {
-			client.Close()
-		}
-		halfClosed <- struct{}{}
-		return err
-	})
-	
-	// client → server
-	errGroup.Go(func() error {
-		_, err := io.Copy(server, client)
-		if conn, ok := server.(halfCloser); ok {
-			conn.CloseWrite()
-		} else {
-			server.Close()
-		}
-		halfClosed <- struct{}{}
-		return err
-	})
-	
-	return errGroup.Wait()
-}
