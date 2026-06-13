@@ -1,4 +1,5 @@
-// Command proxy is a MITM HTTP/HTTPS proxy built on top of github.com/aomori446/mitm.
+// Command proxy demonstrates how to build a MITM HTTP/HTTPS proxy using
+// github.com/aomori446/mitm, with a Logger interceptor attached.
 package main
 
 import (
@@ -6,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/aomori446/mitm"
 	"github.com/aomori446/mitm/cert"
+	"github.com/aomori446/mitm/interceptor"
 )
 
 func main() {
@@ -31,6 +34,10 @@ func main() {
 	}
 
 	handler := mitm.New(certMgr)
+
+	onReq, onResp := interceptor.Logger(slog.Default())
+	handler.OnRequest(onReq)
+	handler.OnResponse(onResp)
 
 	server := &http.Server{
 		Addr:    *addr,
