@@ -19,23 +19,36 @@ import (
 //	handler.OnRequest(onReq)
 //	handler.OnResponse(onResp)
 func Logger(log *slog.Logger) (OnRequestFunc, OnResponseFunc) {
-	type startKey struct{}
+	type key struct{}
+	type value struct {
+		id   int
+		time time.Time
+	}
+
+	var idCounter int
 
 	onReq := func(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {
-		log.InfoContext(ctx, "request",
+		log.InfoContext(ctx,
+			"request",
+			"id", idCounter,
 			"method", req.Method,
 			"url", req.URL.String(),
 		)
-		ctx = context.WithValue(ctx, startKey{}, time.Now())
+		ctx = context.WithValue(ctx, key{}, value{id: idCounter, time: time.Now()})
+		idCounter++
 		return req.WithContext(ctx), nil
 	}
 
 	onResp := func(ctx context.Context, resp *http.Response) (*http.Response, error) {
 		elapsed := ""
-		if t, ok := ctx.Value(startKey{}).(time.Time); ok {
-			elapsed = time.Since(t).String()
+		id := 0
+		if v, ok := ctx.Value(key{}).(value); ok {
+			elapsed = time.Since(v.time).String()
+			id = v.id
 		}
-		log.InfoContext(ctx, "response",
+		log.InfoContext(ctx,
+			"response",
+			"id", id,
 			"status", resp.StatusCode,
 			"content_type", resp.Header.Get("Content-Type"),
 			"elapsed", elapsed,

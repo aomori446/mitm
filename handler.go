@@ -6,14 +6,15 @@ import (
 	"crypto/tls"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"sync"
 	"time"
-	
+
 	"golang.org/x/sync/singleflight"
-	
+
 	"github.com/aomori446/mitm/cert"
 	"github.com/aomori446/mitm/interceptor"
 )
@@ -22,11 +23,11 @@ import (
 // TLS interception (MITM) on CONNECT tunnels when a [cert.Manager] is provided.
 type Handler struct {
 	certMgr *cert.Manager // nil means plain TCP relay (no MITM)
-	
+
 	httpProxy  *httputil.ReverseProxy
 	onRequest  []interceptor.OnRequestFunc
 	onResponse []interceptor.OnResponseFunc
-	
+
 	transports     sync.Map
 	transportGroup singleflight.Group
 }
@@ -77,18 +78,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.handleCONNECT(req.Context(), w, req.Host)
 		return
 	}
-	
+
 	newReq, newResp := h.runRequestHooks(req.Context(), req)
 	if newResp != nil {
 		defer newResp.Body.Close()
-		for k, v := range newResp.Header {
-			w.Header()[k] = v
-		}
+		maps.Copy(w.Header(), newResp.Header)
 		w.WriteHeader(newResp.StatusCode)
 		io.Copy(w, newResp.Body)
 		return
 	}
-	
+
 	h.httpProxy.ServeHTTP(w, newReq)
 }
 
@@ -105,17 +104,17 @@ func (h *Handler) handleCONNECT(ctx context.Context, w http.ResponseWriter, dstA
 		return
 	}
 	defer downstream.Close()
-	
+
 	if _, err = downstream.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		slog.Error("Send 200 Established failed", "error", err)
 		return
 	}
-	
+
 	if h.certMgr == nil {
 		h.handleCONNECTWithoutMITM(ctx, downstream, dstAddr)
 		return
 	}
-	
+
 	h.handleCONNECTWithMITM(ctx, downstream, dstAddr)
 }
 
@@ -127,7 +126,7 @@ func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.C
 		return
 	}
 	defer upstream.Close()
-	
+
 	if err = TCPRelay(ctx, downstream, upstream); err != nil {
 		slog.Error("Relay failed", "error", err)
 	}
@@ -141,13 +140,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		return
 	}
 	defer tlsDownstream.Close()
-	
-	hostname, _, err := net.SplitHostPort(dstAddr)
-	if err != nil {
-		slog.Error("Failed to parse dstAddr", "addr", dstAddr, "error", err)
-		return
-	}
-	
+
 	// Unblock ReadRequest when ctx is cancelled (e.g. server shutdown).
 	done := make(chan struct{})
 	defer close(done)
@@ -158,28 +151,28 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		case <-done:
 		}
 	}()
-	
-	transport := h.transportFor(dstAddr, hostname)
-	
+
+	transport := h.transportFor(dstAddr)
+
 	br := bufio.NewReader(tlsDownstream)
 	for {
 		req, err := http.ReadRequest(br)
 		if err != nil {
 			break
 		}
-		
+
 		req.URL.Scheme = "https"
 		req.URL.Host = dstAddr
 		req.RequestURI = ""
 		req = req.WithContext(ctx)
-		
+
 		newReq, newResp := h.runRequestHooks(ctx, req)
 		if newResp != nil {
 			newResp.Write(tlsDownstream)
 			newResp.Body.Close()
 			continue
 		}
-		
+
 		resp, err := transport.RoundTrip(newReq)
 		if err != nil {
 			slog.Error("MITM round trip failed", "error", err)
@@ -187,7 +180,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 			errResp.Write(tlsDownstream)
 			break
 		}
-		
+
 		resp, err = h.runResponseHooks(resp.Request.Context(), resp)
 		if err != nil {
 			slog.Error("response hook aborted the chain", "error", err)
@@ -196,7 +189,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 			errResp.Write(tlsDownstream)
 			break
 		}
-		
+
 		err = resp.Write(tlsDownstream)
 		resp.Body.Close()
 		if err != nil {
@@ -207,32 +200,22 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 
 // transportFor returns the shared [http.Transport] for dstAddr, creating one if needed.
 // Connections are reused across CONNECT sessions to the same host.
-func (h *Handler) transportFor(dstAddr, hostname string) *http.Transport {
+func (h *Handler) transportFor(dstAddr string) *http.Transport {
 	if v, ok := h.transports.Load(dstAddr); ok {
 		return v.(*http.Transport)
 	}
 	v, _, _ := h.transportGroup.Do(dstAddr, func() (any, error) {
-		t := &http.Transport{
-			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := net.Dial("tcp", dstAddr)
-				if err != nil {
-					return nil, err
-				}
-				tlsConn := tls.Client(conn, &tls.Config{
-					ServerName: hostname,
+		transport := &http.Transport{
+			DialTLSContext: (&tls.Dialer{
+				Config: &tls.Config{
 					NextProtos: []string{"http/1.1"},
-				})
-				if err = tlsConn.Handshake(); err != nil {
-					tlsConn.Close()
-					return nil, err
-				}
-				return tlsConn, nil
-			},
+				},
+			}).DialContext,
 			DisableCompression:    true,
 			ResponseHeaderTimeout: 30 * time.Second,
 			MaxIdleConnsPerHost:   10,
 		}
-		actual, _ := h.transports.LoadOrStore(dstAddr, t)
+		actual, _ := h.transports.LoadOrStore(dstAddr, transport)
 		return actual, nil
 	})
 	return v.(*http.Transport)
