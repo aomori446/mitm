@@ -148,3 +148,7 @@ relay.go       TCPRelay for transparent tunnelling
 ## Requirements
 
 - Go 1.21+
+
+## License
+
+(C) 2026 Aomori446, [MIT License](https://github.com/aomori446/mitm/blob/main/LICENSE)  
