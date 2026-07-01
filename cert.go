@@ -1,7 +1,5 @@
-// Package cert provides TLS certificate management for MITM proxies.
-// It handles loading a CA certificate, forging per-host leaf certificates
-// on demand, and caching them for reuse within the same process.
-package cert
+// Package mitm provides a Man-in-the-Middle (MITM) HTTP/HTTPS proxy library.
+package mitm
 
 import (
 	"crypto/ecdsa"
@@ -18,9 +16,9 @@ import (
 	"time"
 )
 
-// Manager loads a CA certificate and key, then forges per-host leaf
+// CertManager loads a CA certificate and key, then forges per-host leaf
 // certificates on the fly for use in a MITM TLS handshake.
-type Manager struct {
+type CertManager struct {
 	caCert *x509.Certificate
 	caKey  *ecdsa.PrivateKey
 	cache  sync.Map // map[string]*cachedCert
@@ -32,9 +30,9 @@ type cachedCert struct {
 	expiresAt time.Time
 }
 
-// NewManager loads a CA certificate and private key from PEM files and
-// returns a Manager ready to forge leaf certificates.
-func NewManager(certFile, keyFile string) (*Manager, error) {
+// NewCertManager loads a CA certificate and private key from PEM files and
+// returns a CertManager ready to forge leaf certificates.
+func NewCertManager(certFile, keyFile string) (*CertManager, error) {
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
 		return nil, err
@@ -56,7 +54,7 @@ func NewManager(certFile, keyFile string) (*Manager, error) {
 		return nil, err
 	}
 
-	return &Manager{
+	return &CertManager{
 		caCert: caCert,
 		caKey:  caKey,
 	}, nil
@@ -64,7 +62,7 @@ func NewManager(certFile, keyFile string) (*Manager, error) {
 
 // GetCert returns a forged leaf TLS certificate for host, creating and
 // caching it on first access. Expired entries are evicted and re-forged.
-func (m *Manager) GetCert(host string) (*tls.Certificate, error) {
+func (m *CertManager) GetCert(host string) (*tls.Certificate, error) {
 	if v, ok := m.cache.Load(host); ok {
 		if cc := v.(*cachedCert); time.Now().Before(cc.expiresAt) {
 			return cc.cert, nil
@@ -87,7 +85,7 @@ func (m *Manager) GetCert(host string) (*tls.Certificate, error) {
 
 // TLSConfig returns a *tls.Config that dynamically forges a certificate for
 // the SNI hostname presented by the client.
-func (m *Manager) TLSConfig() *tls.Config {
+func (m *CertManager) TLSConfig() *tls.Config {
 	return &tls.Config{
 		GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return m.GetCert(info.ServerName)
@@ -95,7 +93,7 @@ func (m *Manager) TLSConfig() *tls.Config {
 	}
 }
 
-func (m *Manager) forgeCert(host string) (*tls.Certificate, error) {
+func (m *CertManager) forgeCert(host string) (*tls.Certificate, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err

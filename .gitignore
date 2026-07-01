@@ -1,5 +1,6 @@
 .idea/
-certs/
+testdata/ca.crt
+testdata/ca.key
 mitm.iml
 .DS_Store
 **/.DS_Store

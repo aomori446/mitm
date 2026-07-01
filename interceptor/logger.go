@@ -24,7 +24,6 @@ func Logger(log *slog.Logger) (OnRequestFunc, OnResponseFunc) {
 		id   int
 		time time.Time
 	}
-
 	var idCounter int
 
 	onReq := func(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {

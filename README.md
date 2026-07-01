@@ -25,11 +25,10 @@ import (
     "net/http"
 
     "github.com/aomori446/mitm"
-    "github.com/aomori446/mitm/cert"
 )
 
 func main() {
-    certMgr, _ := cert.NewManager("certs/ca.crt", "certs/ca.key")
+    certMgr, _ := mitm.NewCertManager("testdata/ca.crt", "testdata/ca.key")
 
     handler := mitm.New(certMgr)
 
@@ -37,7 +36,7 @@ func main() {
 }
 ```
 
-Point your browser's proxy settings to `localhost:8080` and install `certs/ca.crt` as a trusted CA.
+Point your browser's proxy settings to `localhost:8080` and install `testdata/ca.crt` as a trusted CA.
 
 ## Hooks
 
@@ -126,19 +125,19 @@ Writes each request and response in HTTP/1.1 wire format to the provided writer.
 ## Generating a CA Certificate
 
 ```sh
-go run ./examples/genca -cert certs/ca.crt -key certs/ca.key
+go run ./examples/genca -cert testdata/ca.crt -key testdata/ca.key
 ```
 
 ## Running the Example Proxy
 
 ```sh
-go run ./examples/proxy -addr :8080 -ca-cert certs/ca.crt -ca-key certs/ca.key
+go run ./examples/proxy -addr :8080 -ca-cert testdata/ca.crt -ca-key testdata/ca.key
 ```
 
 ## Project Structure
 
 ```
-cert/          CA loading, per-host cert forging and caching
+cert.go        CA loading, per-host cert forging and caching
 interceptor/   Hook types and built-in interceptors
 examples/      Runnable reference implementations
 handler.go     Core proxy handler (ServeHTTP, CONNECT, hooks)
@@ -151,4 +150,4 @@ relay.go       TCPRelay for transparent tunnelling
 
 ## License
 
-(C) 2026 Aomori446, [MIT License](https://github.com/aomori446/mitm/blob/main/LICENSE)  
+(C) 2026 Aomori446, [MIT License](https://github.com/aomori446/mitm/blob/main/LICENSE)

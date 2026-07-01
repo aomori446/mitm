@@ -14,19 +14,40 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
-
-	"github.com/aomori446/mitm/cert"
-	"github.com/aomori446/mitm/interceptor"
 )
 
+// OnRequestFunc is called before a request is forwarded to the upstream server.
+type OnRequestFunc func(ctx context.Context, req *http.Request) (*http.Request, *http.Response)
+
+// OnResponseFunc is called after the upstream response is received and before
+// it is written back to the client. The original request is available via resp.Request.
+type OnResponseFunc func(ctx context.Context, resp *http.Response) (*http.Response, error)
+
+// Response constructs a standard *http.Response helper.
+func Response(status int, contentType string, body io.ReadCloser) *http.Response {
+	header := make(http.Header)
+	if contentType != "" {
+		header.Set("Content-Type", contentType)
+	}
+	return &http.Response{
+		StatusCode:    status,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        header,
+		Body:          body,
+		ContentLength: -1,
+	}
+}
+
 // Handler is an [http.Handler] that acts as a forward proxy and performs
-// TLS interception (MITM) on CONNECT tunnels when a [cert.Manager] is provided.
+// TLS interception (MITM) on CONNECT tunnels when a [CertManager] is provided.
 type Handler struct {
-	certMgr *cert.Manager // nil means plain TCP relay (no MITM)
+	certMgr *CertManager // nil means plain TCP relay (no MITM)
 
 	httpProxy  *httputil.ReverseProxy
-	onRequest  []interceptor.OnRequestFunc
-	onResponse []interceptor.OnResponseFunc
+	onRequest  []OnRequestFunc
+	onResponse []OnResponseFunc
 
 	transports     sync.Map
 	transportGroup singleflight.Group
@@ -38,7 +59,7 @@ type Handler struct {
 // The caller should set [http.Server.BaseContext] to a context that is
 // canceled on shutdown so that long-lived CONNECT tunnels are torn down
 // promptly when the server stops.
-func New(certMgr *cert.Manager) *Handler {
+func New(certMgr *CertManager) *Handler {
 	h := &Handler{
 		certMgr: certMgr,
 	}
@@ -61,13 +82,13 @@ func New(certMgr *cert.Manager) *Handler {
 
 // OnRequest registers fn as a request interceptor hook.
 // Hooks are called in registration order before each upstream request.
-func (h *Handler) OnRequest(fn interceptor.OnRequestFunc) {
+func (h *Handler) OnRequest(fn OnRequestFunc) {
 	h.onRequest = append(h.onRequest, fn)
 }
 
 // OnResponse registers fn as a response interceptor hook.
 // Hooks are called in registration order after each upstream response.
-func (h *Handler) OnResponse(fn interceptor.OnResponseFunc) {
+func (h *Handler) OnResponse(fn OnResponseFunc) {
 	h.onResponse = append(h.onResponse, fn)
 }
 
@@ -176,7 +197,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		resp, err := transport.RoundTrip(newReq)
 		if err != nil {
 			slog.Error("MITM round trip failed", "error", err)
-			errResp := interceptor.Response(http.StatusBadGateway, "", http.NoBody)
+			errResp := Response(http.StatusBadGateway, "", http.NoBody)
 			errResp.Write(tlsDownstream)
 			break
 		}
@@ -185,7 +206,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		if err != nil {
 			slog.Error("response hook aborted the chain", "error", err)
 			resp.Body.Close()
-			errResp := interceptor.Response(http.StatusBadGateway, "", http.NoBody)
+			errResp := Response(http.StatusBadGateway, "", http.NoBody)
 			errResp.Write(tlsDownstream)
 			break
 		}

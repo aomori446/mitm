@@ -4,7 +4,7 @@
 //
 // Usage:
 //
-//	go run ./examples/header -ca-cert certs/ca.crt -ca-key certs/ca.key
+//	go run ./examples/header -ca-cert testdata/ca.crt -ca-key testdata/ca.key
 package main
 
 import (
@@ -19,20 +19,19 @@ import (
 	"syscall"
 
 	"github.com/aomori446/mitm"
-	"github.com/aomori446/mitm/cert"
 	"github.com/aomori446/mitm/interceptor"
 )
 
 func main() {
 	addr := flag.String("addr", ":8080", "proxy listen address")
-	caCert := flag.String("ca-cert", "certs/ca.crt", "path to CA certificate file")
-	caKey := flag.String("ca-key", "certs/ca.key", "path to CA private key file")
+	caCert := flag.String("ca-cert", "testdata/ca.crt", "path to CA certificate file")
+	caKey := flag.String("ca-key", "testdata/ca.key", "path to CA private key file")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	defer stop()
 
-	certMgr, err := cert.NewManager(*caCert, *caKey)
+	certMgr, err := mitm.NewCertManager(*caCert, *caKey)
 	if err != nil {
 		log.Fatal(err)
 	}

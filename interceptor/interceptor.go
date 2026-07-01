@@ -1,30 +1,20 @@
 package interceptor
 
 import (
-	"context"
 	"io"
 	"net/http"
+
+	"github.com/aomori446/mitm"
 )
 
 // OnRequestFunc is called before a request is forwarded to the upstream server.
-type OnRequestFunc func(ctx context.Context, req *http.Request) (*http.Request, *http.Response)
+type OnRequestFunc = mitm.OnRequestFunc
 
 // OnResponseFunc is called after the upstream response is received and before
 // it is written back to the client. The original request is available via resp.Request.
-type OnResponseFunc func(ctx context.Context, resp *http.Response) (*http.Response, error)
+type OnResponseFunc = mitm.OnResponseFunc
 
+// Response constructs a standard *http.Response helper.
 func Response(status int, contentType string, body io.ReadCloser) *http.Response {
-	header := make(http.Header)
-	if contentType != "" {
-		header.Set("Content-Type", contentType)
-	}
-	return &http.Response{
-		StatusCode:    status,
-		Proto:         "HTTP/1.1",
-		ProtoMajor:    1,
-		ProtoMinor:    1,
-		Header:        header,
-		Body:          body,
-		ContentLength: -1,
-	}
+	return mitm.Response(status, contentType, body)
 }

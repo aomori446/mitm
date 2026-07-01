@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/aomori446/mitm/interceptor"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -65,6 +64,6 @@ func TCPRelay(ctx context.Context, client, server net.Conn) error {
 // writeErrorToConn writes a minimal HTTP error response to a raw connection.
 // Used after hijacking when http.ResponseWriter is no longer available.
 func writeErrorToConn(conn net.Conn, status int) {
-	resp := interceptor.Response(status, "", http.NoBody)
+	resp := Response(status, "", http.NoBody)
 	resp.Write(conn)
 }
