@@ -38,7 +38,8 @@ func (h *Handler) handleCONNECT(ctx context.Context, w http.ResponseWriter, dstA
 }
 
 func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.Conn, dstAddr string) {
-	upstream, err := net.DialTimeout("tcp", dstAddr, time.Second*3)
+	var dialer net.Dialer
+	upstream, err := dialer.DialContext(ctx, "tcp", dstAddr)
 	if err != nil {
 		slog.Error("Dial failed", "error", err, "dstAddr", dstAddr)
 		writeErrorToConn(downstream, http.StatusBadGateway)
@@ -60,13 +61,12 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 	}
 	defer tlsDownstream.Close()
 	
-	// Unblock ReadRequest when ctx is canceled (e.g. server shutdown).
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		select {
 		case <-ctx.Done():
-			tlsDownstream.SetDeadline(time.Now())
+			tlsDownstream.SetReadDeadline(time.Now())
 		case <-done:
 		}
 	}()

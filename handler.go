@@ -35,6 +35,8 @@ func Response(status int, contentType string, body io.ReadCloser) *http.Response
 // Handler is an [http.Handler] that acts as a forward proxy and performs
 // TLS interception (MITM) on CONNECT tunnels when a [CertManager] is provided.
 type Handler struct {
+	mu sync.RWMutex
+	
 	certMgr *CertManager // nil means plain TCP relay (no MITM)
 	
 	httpProxy *httputil.ReverseProxy
@@ -65,12 +67,16 @@ func New(certMgr *CertManager) *Handler {
 // OnRequest registers fn as a request interceptor hook.
 // Hooks are called in registration order before each upstream request.
 func (h *Handler) OnRequest(fn OnRequestFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.onRequest = append(h.onRequest, fn)
 }
 
 // OnResponse registers fn as a response interceptor hook.
 // Hooks are called in registration order after each upstream response.
 func (h *Handler) OnResponse(fn OnResponseFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.onResponse = append(h.onResponse, fn)
 }
 
@@ -86,7 +92,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Response) {
-	for _, fn := range h.onRequest {
+	h.mu.RLock()
+	hooks := h.onRequest
+	h.mu.RUnlock()
+	
+	for _, fn := range hooks {
 		newReq, newResp := fn(req.Context(), req)
 		if newResp != nil {
 			return nil, newResp
@@ -102,7 +112,11 @@ func (h *Handler) runResponseHooks(resp *http.Response) (*http.Response, error) 
 		ctx = resp.Request.Context()
 	}
 	
-	for _, fn := range h.onResponse {
+	h.mu.RLock()
+	hooks := h.onResponse
+	h.mu.RUnlock()
+	
+	for _, fn := range hooks {
 		newResp, err := fn(ctx, resp)
 		if err != nil {
 			return newResp, err

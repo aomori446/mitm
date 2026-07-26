@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,17 +25,17 @@ func Logger(log *slog.Logger) (OnRequestFunc, OnResponseFunc) {
 		id   int
 		time time.Time
 	}
-	var idCounter int
+	var idCounter atomic.Uint64
 
 	onReq := func(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {
+		id := idCounter.Add(1)
 		log.InfoContext(ctx,
 			"request",
-			"id", idCounter,
+			"id", id,
 			"method", req.Method,
 			"url", req.URL.String(),
 		)
-		ctx = context.WithValue(ctx, key{}, value{id: idCounter, time: time.Now()})
-		idCounter++
+		ctx = context.WithValue(ctx, key{}, value{id: int(id), time: time.Now()})
 		return req.WithContext(ctx), nil
 	}
 

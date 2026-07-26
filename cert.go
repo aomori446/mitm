@@ -18,6 +18,7 @@ import (
 type CertManager struct {
 	caCert      *x509.Certificate
 	caKey       *ecdsa.PrivateKey
+	leafKey     *ecdsa.PrivateKey
 	cachedCerts sync.Map // map[host string]*tls.Certificate
 }
 
@@ -42,9 +43,15 @@ func NewCertManager(certFile, keyFile string) (*CertManager, error) {
 		return nil, err
 	}
 	
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	
 	return &CertManager{
-		caCert: caCert,
-		caKey:  caKey,
+		caCert:  caCert,
+		caKey:   caKey,
+		leafKey: leafKey,
 	}, nil
 }
 
@@ -73,11 +80,6 @@ func (m *CertManager) TLSConfig() *tls.Config {
 }
 
 func (m *CertManager) forgeCert(host string) (*tls.Certificate, error) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, err
@@ -102,14 +104,14 @@ func (m *CertManager) forgeCert(host string) (*tls.Certificate, error) {
 		template.DNSNames = []string{host}
 	}
 	
-	certDER, err := x509.CreateCertificate(rand.Reader, template, m.caCert, &priv.PublicKey, m.caKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, m.caCert, &m.leafKey.PublicKey, m.caKey)
 	if err != nil {
 		return nil, err
 	}
 	
 	cert := &tls.Certificate{
 		Certificate: [][]byte{certDER},
-		PrivateKey:  priv,
+		PrivateKey:  m.leafKey,
 		Leaf:        template,
 	}
 	return cert, nil
