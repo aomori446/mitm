@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-func (h *Handler) handleCONNECT(ctx context.Context, w http.ResponseWriter, dstAddr string) {
+func (h *Handler) handleCONNECT(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	dstAddr := req.Host
+
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Proxy error: hijacking not supported", http.StatusInternalServerError)
@@ -38,8 +41,7 @@ func (h *Handler) handleCONNECT(ctx context.Context, w http.ResponseWriter, dstA
 }
 
 func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.Conn, dstAddr string) {
-	var dialer net.Dialer
-	upstream, err := dialer.DialContext(ctx, "tcp", dstAddr)
+	upstream, err := new(net.Dialer).DialContext(ctx, "tcp", dstAddr)
 	if err != nil {
 		slog.Error("Dial failed", "error", err, "dstAddr", dstAddr)
 		writeErrorToConn(downstream, http.StatusBadGateway)

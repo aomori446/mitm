@@ -84,7 +84,7 @@ func (h *Handler) OnResponse(fn OnResponseFunc) {
 // all other methods run OnRequest hooks then are proxied via the reverse proxy.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodConnect {
-		h.handleCONNECT(req.Context(), w, req.Host)
+		h.handleCONNECT(w, req)
 		return
 	}
 	
