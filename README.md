@@ -22,21 +22,29 @@ package main
 
 import (
     "context"
-    "net/http"
+    "os"
+    "os/signal"
+    "syscall"
 
     "github.com/aomori446/mitm"
 )
 
 func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer stop()
+
     certMgr, _ := mitm.NewCertManager("testdata/ca.crt", "testdata/ca.key")
 
     handler := mitm.New(certMgr)
 
-    http.ListenAndServe(":8080", handler)
+    // Starts proxy server with built-in graceful shutdown on ctx cancellation
+    handler.ListenAndServe(ctx, ":8080")
 }
 ```
 
 Point your browser's proxy settings to `localhost:8080` and install `testdata/ca.crt` as a trusted CA.
+
+> **Note**: `mitm.Handler` also implements `http.Handler`, so you can plug it into a custom `http.Server` or multiplexer if needed.
 
 ## Hooks
 
@@ -138,10 +146,12 @@ go run ./examples/proxy -addr :8080 -ca-cert testdata/ca.crt -ca-key testdata/ca
 
 ```
 cert.go        CA loading, per-host cert forging and caching
+connect.go     CONNECT tunnel handling (MITM & TCP relay)
+handler.go     Core proxy handler (ServeHTTP, ListenAndServe, hooks)
+relay.go       TCPRelay for transparent tunnelling
+transport.go   Upstream connection pooling and hook transport
 interceptor/   Hook types and built-in interceptors
 examples/      Runnable reference implementations
-handler.go     Core proxy handler (ServeHTTP, CONNECT, hooks)
-relay.go       TCPRelay for transparent tunnelling
 ```
 
 ## Requirements
