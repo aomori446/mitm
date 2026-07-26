@@ -12,8 +12,8 @@ import (
 
 func (h *Handler) handleCONNECT(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
-	dstAddr := req.Host
-
+	host := req.Host
+	
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Proxy error: hijacking not supported", http.StatusInternalServerError)
@@ -33,17 +33,17 @@ func (h *Handler) handleCONNECT(w http.ResponseWriter, req *http.Request) {
 	}
 	
 	if h.certMgr == nil {
-		h.handleCONNECTWithoutMITM(ctx, downstream, dstAddr)
+		h.handleCONNECTWithoutMITM(ctx, downstream, host)
 		return
 	}
 	
-	h.handleCONNECTWithMITM(ctx, downstream, dstAddr)
+	h.handleCONNECTWithMITM(ctx, downstream, host)
 }
 
-func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.Conn, dstAddr string) {
-	upstream, err := new(net.Dialer).DialContext(ctx, "tcp", dstAddr)
+func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.Conn, host string) {
+	upstream, err := new(net.Dialer).DialContext(ctx, "tcp", host)
 	if err != nil {
-		slog.Error("Dial failed", "error", err, "dstAddr", dstAddr)
+		slog.Error("Dial failed", "error", err, "dstAddr", host)
 		writeErrorToConn(downstream, http.StatusBadGateway)
 		return
 	}
@@ -54,7 +54,7 @@ func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.C
 	}
 }
 
-func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn, dstAddr string) {
+func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn, host string) {
 	tlsDownstream := tls.Server(downstream, h.certMgr.TLSConfig())
 	if err := tlsDownstream.Handshake(); err != nil {
 		slog.Error("TLS handshake with client failed", "addr", downstream.RemoteAddr().String(), "error", err)
@@ -74,7 +74,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 	}()
 	
 	mitmTransport := &hookTransport{
-		base:    h.transportFor(dstAddr),
+		base:    h.transportFor(host),
 		handler: h,
 	}
 	
@@ -86,7 +86,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		}
 		
 		req.URL.Scheme = "https"
-		req.URL.Host = dstAddr
+		req.URL.Host = host
 		req = req.WithContext(ctx)
 		
 		resp, err := mitmTransport.RoundTrip(req)

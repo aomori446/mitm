@@ -2,10 +2,13 @@ package mitm
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"sync"
+	"time"
 )
 
 // OnRequestFunc is called before a request is forwarded to the upstream server.
@@ -89,6 +92,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	
 	h.httpProxy.ServeHTTP(w, req)
+}
+
+// ListenAndServe starts an HTTP proxy server on the given network address.
+// It uses ctx as the BaseContext for all incoming connections and shuts down
+// gracefully when ctx is canceled.
+func (h *Handler) ListenAndServe(ctx context.Context, addr string) error {
+	server := &http.Server{
+		Addr:        addr,
+		Handler:     h,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	err := server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Response) {
