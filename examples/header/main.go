@@ -9,11 +9,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -52,19 +49,7 @@ func main() {
 	handler.OnResponse(interceptor.RemoveResponseHeader("X-Powered-By"))
 	handler.OnResponse(interceptor.RemoveResponseHeader("Server"))
 
-	server := &http.Server{
-		Addr:    *addr,
-		Handler: handler,
-		BaseContext: func(net.Listener) context.Context { return ctx },
-	}
-
-	go func() {
-		<-ctx.Done()
-		server.Shutdown(ctx)
-	}()
-
-	err = server.ListenAndServe()
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := handler.ListenAndServe(ctx, *addr); err != nil {
 		log.Fatal(err)
 	}
 }

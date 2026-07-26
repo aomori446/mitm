@@ -8,11 +8,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -42,19 +39,7 @@ func main() {
 	handler.OnRequest(onReq)
 	handler.OnResponse(onResp)
 
-	server := &http.Server{
-		Addr:    *addr,
-		Handler: handler,
-		BaseContext: func(net.Listener) context.Context { return ctx },
-	}
-
-	go func() {
-		<-ctx.Done()
-		server.Shutdown(ctx)
-	}()
-
-	err = server.ListenAndServe()
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := handler.ListenAndServe(ctx, *addr); err != nil {
 		log.Fatal(err)
 	}
 }
