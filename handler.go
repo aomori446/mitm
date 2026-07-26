@@ -1,19 +1,11 @@
 package mitm
 
 import (
-	"bufio"
 	"context"
-	"crypto/tls"
 	"io"
-	"log/slog"
-	"maps"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"sync"
-	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 // OnRequestFunc is called before a request is forwarded to the upstream server.
@@ -44,13 +36,13 @@ func Response(status int, contentType string, body io.ReadCloser) *http.Response
 // TLS interception (MITM) on CONNECT tunnels when a [CertManager] is provided.
 type Handler struct {
 	certMgr *CertManager // nil means plain TCP relay (no MITM)
-
-	httpProxy  *httputil.ReverseProxy
+	
+	httpProxy *httputil.ReverseProxy
+	
 	onRequest  []OnRequestFunc
 	onResponse []OnResponseFunc
-
-	transports     sync.Map
-	transportGroup singleflight.Group
+	
+	transports sync.Map // map[host string]*http.Transport
 }
 
 // New creates a Handler. Providing a non-nil certMgr enables TLS interception;
@@ -64,18 +56,8 @@ func New(certMgr *CertManager) *Handler {
 		certMgr: certMgr,
 	}
 	h.httpProxy = &httputil.ReverseProxy{
-		Rewrite: func(preq *httputil.ProxyRequest) {
-			preq.Out.URL.Scheme = "http"
-			preq.Out.URL.Host = preq.In.Host
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			newResp, err := h.runResponseHooks(resp.Request.Context(), resp)
-			if err != nil {
-				return err
-			}
-			*resp = *newResp
-			return nil
-		},
+		Rewrite:   func(*httputil.ProxyRequest) {},
+		Transport: &hookTransport{base: http.DefaultTransport, handler: h},
 	}
 	return h
 }
@@ -99,152 +81,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.handleCONNECT(req.Context(), w, req.Host)
 		return
 	}
-
-	newReq, newResp := h.runRequestHooks(req.Context(), req)
-	if newResp != nil {
-		defer newResp.Body.Close()
-		maps.Copy(w.Header(), newResp.Header)
-		w.WriteHeader(newResp.StatusCode)
-		io.Copy(w, newResp.Body)
-		return
-	}
-
-	h.httpProxy.ServeHTTP(w, newReq)
+	
+	h.httpProxy.ServeHTTP(w, req)
 }
 
-func (h *Handler) handleCONNECT(ctx context.Context, w http.ResponseWriter, dstAddr string) {
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Proxy error: hijacking not supported", http.StatusInternalServerError)
-		slog.Error("Hijacking not supported by ResponseWriter")
-		return
-	}
-	downstream, _, err := hijacker.Hijack()
-	if err != nil {
-		slog.Error("Hijack failed", "error", err)
-		return
-	}
-	defer downstream.Close()
-
-	if _, err = downstream.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		slog.Error("Send 200 Established failed", "error", err)
-		return
-	}
-
-	if h.certMgr == nil {
-		h.handleCONNECTWithoutMITM(ctx, downstream, dstAddr)
-		return
-	}
-
-	h.handleCONNECTWithMITM(ctx, downstream, dstAddr)
-}
-
-func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.Conn, dstAddr string) {
-	upstream, err := net.Dial("tcp", dstAddr)
-	if err != nil {
-		slog.Error("Dial failed", "error", err)
-		writeErrorToConn(downstream, http.StatusBadGateway)
-		return
-	}
-	defer upstream.Close()
-
-	if err = TCPRelay(ctx, downstream, upstream); err != nil {
-		slog.Error("Relay failed", "error", err)
-	}
-}
-
-func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn, dstAddr string) {
-	tlsDownstream := tls.Server(downstream, h.certMgr.TLSConfig())
-	if err := tlsDownstream.Handshake(); err != nil {
-		slog.Error("TLS handshake with client failed", "addr", downstream.RemoteAddr().String(), "error", err)
-		writeErrorToConn(downstream, http.StatusBadGateway)
-		return
-	}
-	defer tlsDownstream.Close()
-
-	// Unblock ReadRequest when ctx is cancelled (e.g. server shutdown).
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			tlsDownstream.SetDeadline(time.Now())
-		case <-done:
-		}
-	}()
-
-	transport := h.transportFor(dstAddr)
-
-	br := bufio.NewReader(tlsDownstream)
-	for {
-		req, err := http.ReadRequest(br)
-		if err != nil {
-			break
-		}
-
-		req.URL.Scheme = "https"
-		req.URL.Host = dstAddr
-		req.RequestURI = ""
-		req = req.WithContext(ctx)
-
-		newReq, newResp := h.runRequestHooks(ctx, req)
-		if newResp != nil {
-			newResp.Write(tlsDownstream)
-			newResp.Body.Close()
-			continue
-		}
-
-		resp, err := transport.RoundTrip(newReq)
-		if err != nil {
-			slog.Error("MITM round trip failed", "error", err)
-			errResp := Response(http.StatusBadGateway, "", http.NoBody)
-			errResp.Write(tlsDownstream)
-			break
-		}
-
-		resp, err = h.runResponseHooks(resp.Request.Context(), resp)
-		if err != nil {
-			slog.Error("response hook aborted the chain", "error", err)
-			resp.Body.Close()
-			errResp := Response(http.StatusBadGateway, "", http.NoBody)
-			errResp.Write(tlsDownstream)
-			break
-		}
-
-		err = resp.Write(tlsDownstream)
-		resp.Body.Close()
-		if err != nil {
-			break
-		}
-	}
-}
-
-// transportFor returns the shared [http.Transport] for dstAddr, creating one if needed.
-// Connections are reused across CONNECT sessions to the same host.
-func (h *Handler) transportFor(dstAddr string) *http.Transport {
-	if v, ok := h.transports.Load(dstAddr); ok {
-		return v.(*http.Transport)
-	}
-	v, _, _ := h.transportGroup.Do(dstAddr, func() (any, error) {
-		transport := &http.Transport{
-			DialTLSContext: (&tls.Dialer{
-				Config: &tls.Config{
-					NextProtos: []string{"http/1.1"},
-				},
-			}).DialContext,
-			DisableCompression:    true,
-			ResponseHeaderTimeout: 30 * time.Second,
-			MaxIdleConnsPerHost:   10,
-		}
-		actual, _ := h.transports.LoadOrStore(dstAddr, transport)
-		return actual, nil
-	})
-	return v.(*http.Transport)
-}
-
-func (h *Handler) runRequestHooks(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {
+func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Response) {
 	for _, fn := range h.onRequest {
-		newReq, newResp := fn(ctx, req)
+		newReq, newResp := fn(req.Context(), req)
 		if newResp != nil {
 			return nil, newResp
 		}
@@ -253,7 +96,12 @@ func (h *Handler) runRequestHooks(ctx context.Context, req *http.Request) (*http
 	return req, nil
 }
 
-func (h *Handler) runResponseHooks(ctx context.Context, resp *http.Response) (*http.Response, error) {
+func (h *Handler) runResponseHooks(resp *http.Response) (*http.Response, error) {
+	ctx := context.Background()
+	if resp.Request != nil {
+		ctx = resp.Request.Context()
+	}
+	
 	for _, fn := range h.onResponse {
 		newResp, err := fn(ctx, resp)
 		if err != nil {
