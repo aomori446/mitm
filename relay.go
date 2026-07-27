@@ -13,9 +13,9 @@ type halfCloser interface {
 	CloseWrite() error
 }
 
-// TCPRelay bidirectionally copies data between client and server until either
+// tcpRelay bidirectionally copies data between client and server until either
 // side closes the connection or ctx is canceled.
-func TCPRelay(ctx context.Context, client, server net.Conn) error {
+func tcpRelay(ctx context.Context, client, server net.Conn) error {
 	var errGroup errgroup.Group
 
 	ctx, cancel := context.WithCancel(ctx)
