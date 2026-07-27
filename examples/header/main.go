@@ -16,7 +16,7 @@ import (
 	"syscall"
 
 	"github.com/aomori446/mitm"
-	"github.com/aomori446/mitm/interceptor"
+	"github.com/aomori446/mitm/middleware"
 )
 
 func main() {
@@ -36,18 +36,18 @@ func main() {
 	handler := mitm.New(certMgr)
 
 	// Inject a custom header into every upstream request.
-	handler.OnRequest(interceptor.SetRequestHeader("X-Proxy", "mitm"))
+	handler.UseRequest(middleware.SetRequestHeader("X-Proxy", "mitm"))
 
 	// Strip a tracking header from every upstream request.
-	handler.OnRequest(interceptor.RemoveRequestHeader("Cookie"))
+	handler.UseRequest(middleware.RemoveRequestHeader("Cookie"))
 
 	// Add security headers to every response.
-	handler.OnResponse(interceptor.SetResponseHeader("X-Frame-Options", "DENY"))
-	handler.OnResponse(interceptor.SetResponseHeader("X-Content-Type-Options", "nosniff"))
+	handler.UseResponse(middleware.SetResponseHeader("X-Frame-Options", "DENY"))
+	handler.UseResponse(middleware.SetResponseHeader("X-Content-Type-Options", "nosniff"))
 
 	// Remove server fingerprinting headers from every response.
-	handler.OnResponse(interceptor.RemoveResponseHeader("X-Powered-By"))
-	handler.OnResponse(interceptor.RemoveResponseHeader("Server"))
+	handler.UseResponse(middleware.RemoveResponseHeader("X-Powered-By"))
+	handler.UseResponse(middleware.RemoveResponseHeader("Server"))
 
 	if err := handler.ListenAndServe(ctx, *addr); err != nil {
 		log.Fatal(err)

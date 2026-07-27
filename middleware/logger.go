@@ -1,4 +1,4 @@
-package interceptor
+package middleware
 
 import (
 	"context"
@@ -8,18 +8,18 @@ import (
 	"time"
 )
 
-// Logger returns a pair of hooks that log each proxied request and response
+// Logger returns a pair of middlewares that log each proxied request and response
 // using the provided [slog.Logger].
 //
-// The OnRequest hook records the method and URL at the start of the request.
-// The OnResponse hook records the status code, content type, and elapsed time.
+// The RequestFunc middleware records the method and URL at the start of the request.
+// The ResponseFunc middleware records the status code, content type, and elapsed time.
 //
 // Usage:
 //
-//	onReq, onResp := interceptor.Logger(slog.Default())
-//	handler.OnRequest(onReq)
-//	handler.OnResponse(onResp)
-func Logger(log *slog.Logger) (OnRequestFunc, OnResponseFunc) {
+//	onReq, onResp := middleware.Logger(slog.Default())
+//	handler.UseRequest(onReq)
+//	handler.UseResponse(onResp)
+func Logger(log *slog.Logger) (RequestFunc, ResponseFunc) {
 	type key struct{}
 	type value struct {
 		id   int
@@ -59,3 +59,4 @@ func Logger(log *slog.Logger) (OnRequestFunc, OnResponseFunc) {
 
 	return onReq, onResp
 }
+

@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-type hookTransport struct {
+type middlewareTransport struct {
 	base    http.RoundTripper
 	handler *Handler
 }
 
-func (t *hookTransport) RoundTrip(req *http.Request) (resp *http.Response, err error) {
-	req, resp = t.handler.runRequestHooks(req)
+func (t *middlewareTransport) RoundTrip(req *http.Request) (resp *http.Response, err error) {
+	req, resp = t.handler.runRequestMiddlewares(req)
 	if resp != nil {
 		return resp, nil
 	}
@@ -22,7 +22,7 @@ func (t *hookTransport) RoundTrip(req *http.Request) (resp *http.Response, err e
 		return nil, err
 	}
 	
-	return t.handler.runResponseHooks(resp)
+	return t.handler.runResponseMiddlewares(resp)
 }
 
 func (h *Handler) transportFor(host string) *http.Transport {

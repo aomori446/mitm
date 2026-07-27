@@ -19,7 +19,7 @@ import (
 	"syscall"
 
 	"github.com/aomori446/mitm"
-	"github.com/aomori446/mitm/interceptor"
+	"github.com/aomori446/mitm/middleware"
 )
 
 func main() {
@@ -38,10 +38,10 @@ func main() {
 
 	handler := mitm.New(certMgr)
 
-	// Attach the Logger interceptor.
-	onReq, onResp := interceptor.Logger(slog.Default())
-	handler.OnRequest(onReq)
-	handler.OnResponse(onResp)
+	// Attach the Logger middleware.
+	onReq, onResp := middleware.Logger(slog.Default())
+	handler.UseRequest(onReq)
+	handler.UseResponse(onResp)
 
 	if err := handler.ListenAndServe(ctx, *addr); err != nil {
 		log.Fatal(err)

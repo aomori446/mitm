@@ -5,9 +5,9 @@ A Man-in-the-Middle (MITM) HTTP/HTTPS proxy library for Go.
 ## Features
 
 - Transparent TCP relay or full TLS interception per CONNECT tunnel
-- Unified request/response hook pipeline for both plain-HTTP and HTTPS traffic
+- Unified request/response middleware pipeline for both plain-HTTP and HTTPS traffic
 - Upstream TLS connection pooling with cross-session reuse
-- Built-in interceptors for common use cases
+- Built-in middlewares for common use cases
 
 ## Installation
 
@@ -46,35 +46,35 @@ Point your browser's proxy settings to `localhost:8080` and install `testdata/ca
 
 > **Note**: `mitm.Handler` also implements `http.Handler`, so you can plug it into a custom `http.Server` or multiplexer if needed.
 
-## Hooks
+## Middlewares
 
-Register hooks to inspect or modify traffic:
+Register middlewares to inspect or modify traffic:
 
 ```go
-handler.OnRequest(func(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {
+handler.UseRequest(func(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {
     // Return a modified request, or short-circuit with a synthetic response.
     return req, nil
 })
 
-handler.OnResponse(func(ctx context.Context, resp *http.Response) (*http.Response, error) {
+handler.UseResponse(func(ctx context.Context, resp *http.Response) (*http.Response, error) {
     // Return a modified response, or return an error to abort.
     return resp, nil
 })
 ```
 
-Hooks are called in registration order. A non-nil `*http.Response` from an `OnRequest` hook
+Middlewares are called in registration order. A non-nil `*http.Response` from a `UseRequest` middleware
 short-circuits the upstream request and sends the response directly to the client.
 
-## Built-in Interceptors
+## Built-in Middlewares
 
-All interceptors live in `github.com/aomori446/mitm/interceptor`.
+All middlewares live in `github.com/aomori446/mitm/middleware`.
 
 ### Logger
 
 ```go
-onReq, onResp := interceptor.Logger(slog.Default())
-handler.OnRequest(onReq)
-handler.OnResponse(onResp)
+onReq, onResp := middleware.Logger(slog.Default())
+handler.UseRequest(onReq)
+handler.UseResponse(onResp)
 ```
 
 Logs method, URL, status code, content-type, and elapsed time.
@@ -83,17 +83,17 @@ Logs method, URL, status code, content-type, and elapsed time.
 
 ```go
 // Block by host pattern → 403 Forbidden
-handler.OnRequest(interceptor.Blocker("ads.example.com", "*.doubleclick.net"))
+handler.UseRequest(middleware.Blocker("ads.example.com", "*.doubleclick.net"))
 
 // Block with a content-appropriate empty response
-handler.OnRequest(interceptor.BlockerWith(
-    interceptor.RespondWithAuto(), // pixel / empty JS / empty CSS / empty HTML
+handler.UseRequest(middleware.BlockerWith(
+    middleware.RespondWithAuto(), // pixel / empty JS / empty CSS / empty HTML
     "*.googlesyndication.com",
 ))
 
 // Block by custom match function
-handler.OnRequest(interceptor.BlockerFunc(
-    interceptor.RespondWithEmptyJS(),
+handler.UseRequest(middleware.BlockerFunc(
+    middleware.RespondWithEmptyJS(),
     func(req *http.Request) bool {
         return strings.HasSuffix(req.URL.Path, "/analytics.js")
     },
@@ -114,18 +114,18 @@ Available `BlockResponse` helpers:
 ### Header
 
 ```go
-handler.OnRequest(interceptor.SetRequestHeader("Authorization", "Bearer token"))
-handler.OnRequest(interceptor.RemoveRequestHeader("Cookie"))
-handler.OnResponse(interceptor.SetResponseHeader("X-Frame-Options", "DENY"))
-handler.OnResponse(interceptor.RemoveResponseHeader("Server"))
+handler.UseRequest(middleware.SetRequestHeader("Authorization", "Bearer token"))
+handler.UseRequest(middleware.RemoveRequestHeader("Cookie"))
+handler.UseResponse(middleware.SetResponseHeader("X-Frame-Options", "DENY"))
+handler.UseResponse(middleware.RemoveResponseHeader("Server"))
 ```
 
 ### Dump
 
 ```go
-onReq, onResp := interceptor.Dump(os.Stderr)
-handler.OnRequest(onReq)
-handler.OnResponse(onResp)
+onReq, onResp := middleware.Dump(os.Stderr)
+handler.UseRequest(onReq)
+handler.UseResponse(onResp)
 ```
 
 Writes each request and response in HTTP/1.1 wire format to the provided writer.
@@ -147,10 +147,10 @@ go run ./examples/proxy -addr :8080 -ca-cert testdata/ca.crt -ca-key testdata/ca
 ```
 cert.go        CA loading, per-host cert forging and caching
 connect.go     CONNECT tunnel handling (MITM & TCP relay)
-handler.go     Core proxy handler (ServeHTTP, ListenAndServe, hooks)
+handler.go     Core proxy handler (ServeHTTP, ListenAndServe, middlewares)
 relay.go       TCPRelay for transparent tunnelling
-transport.go   Upstream connection pooling and hook transport
-interceptor/   Hook types and built-in interceptors
+transport.go   Upstream connection pooling and middleware transport
+middleware/    Middleware types and built-in middlewares
 examples/      Runnable reference implementations
 ```
 

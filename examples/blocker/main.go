@@ -16,7 +16,7 @@ import (
 	"syscall"
 
 	"github.com/aomori446/mitm"
-	"github.com/aomori446/mitm/interceptor"
+	"github.com/aomori446/mitm/middleware"
 )
 
 func main() {
@@ -37,15 +37,15 @@ func main() {
 
 	// Block ad hosts by pattern, returning a content-appropriate empty response
 	// (pixel for images, empty JS for scripts, etc.) instead of 403.
-	handler.OnRequest(interceptor.BlockerWith(
-		interceptor.RespondWithAuto(),
+	handler.UseRequest(middleware.BlockerWith(
+		middleware.RespondWithAuto(),
 		"ads.example.com",
 		"*.doubleclick.net",
 	))
 
 	// Block by custom match function — useful when host patterns are not enough.
-	handler.OnRequest(interceptor.BlockerFunc(
-		interceptor.RespondWithEmptyJS(),
+	handler.UseRequest(middleware.BlockerFunc(
+		middleware.RespondWithEmptyJS(),
 		func(req *http.Request) bool {
 			return strings.HasSuffix(req.URL.Path, "/analytics.js")
 		},

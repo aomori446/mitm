@@ -49,7 +49,7 @@ func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.C
 	}
 	defer upstream.Close()
 	
-	if err = TCPRelay(ctx, downstream, upstream); err != nil {
+	if err = tcpRelay(ctx, downstream, upstream); err != nil {
 		slog.Error("Relay failed", "error", err)
 	}
 }
@@ -73,7 +73,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		}
 	}()
 	
-	mitmTransport := &hookTransport{
+	mitmTransport := &middlewareTransport{
 		base:    h.transportFor(host),
 		handler: h,
 	}

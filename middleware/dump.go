@@ -1,4 +1,4 @@
-package interceptor
+package middleware
 
 import (
 	"context"
@@ -9,9 +9,9 @@ import (
 	"sync"
 )
 
-// DumpRequest returns an [OnRequestFunc] that writes each request in HTTP/1.1
+// DumpRequest returns a [RequestFunc] that writes each request in HTTP/1.1
 // wire format (including body) to w. Intended for debugging.
-func DumpRequest(w io.Writer) OnRequestFunc {
+func DumpRequest(w io.Writer) RequestFunc {
 	var mu sync.Mutex
 	return func(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {
 		b, err := httputil.DumpRequest(req, true)
@@ -25,9 +25,9 @@ func DumpRequest(w io.Writer) OnRequestFunc {
 	}
 }
 
-// DumpResponse returns an [OnResponseFunc] that writes each response in
+// DumpResponse returns a [ResponseFunc] that writes each response in
 // HTTP/1.1 wire format (including body) to w. Intended for debugging.
-func DumpResponse(w io.Writer) OnResponseFunc {
+func DumpResponse(w io.Writer) ResponseFunc {
 	var mu sync.Mutex
 	return func(ctx context.Context, resp *http.Response) (*http.Response, error) {
 		b, err := httputil.DumpResponse(resp, true)
@@ -41,9 +41,10 @@ func DumpResponse(w io.Writer) OnResponseFunc {
 	}
 }
 
-// Dump returns a pair of hooks that write each request and response in
+// Dump returns a pair of middlewares that write each request and response in
 // HTTP/1.1 wire format to w. It is a shorthand for calling [DumpRequest]
 // and [DumpResponse] with the same writer.
-func Dump(w io.Writer) (OnRequestFunc, OnResponseFunc) {
+func Dump(w io.Writer) (RequestFunc, ResponseFunc) {
 	return DumpRequest(w), DumpResponse(w)
 }
+

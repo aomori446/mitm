@@ -11,12 +11,12 @@ import (
 	"time"
 )
 
-// OnRequestFunc is called before a request is forwarded to the upstream server.
-type OnRequestFunc func(ctx context.Context, req *http.Request) (*http.Request, *http.Response)
+// RequestFunc is called before a request is forwarded to the upstream server.
+type RequestFunc func(ctx context.Context, req *http.Request) (*http.Request, *http.Response)
 
-// OnResponseFunc is called after the upstream response is received and before
+// ResponseFunc is called after the upstream response is received and before
 // it is written back to the client. The original request is available via resp.Request.
-type OnResponseFunc func(ctx context.Context, resp *http.Response) (*http.Response, error)
+type ResponseFunc func(ctx context.Context, resp *http.Response) (*http.Response, error)
 
 // Response constructs a standard *http.Response helper.
 func Response(status int, contentType string, body io.ReadCloser) *http.Response {
@@ -44,8 +44,8 @@ type Handler struct {
 	
 	httpProxy *httputil.ReverseProxy
 	
-	onRequest  []OnRequestFunc
-	onResponse []OnResponseFunc
+	requestMiddlewares  []RequestFunc
+	responseMiddlewares []ResponseFunc
 	
 	transports sync.Map // map[host string]*http.Transport
 }
@@ -62,29 +62,29 @@ func New(certMgr *CertManager) *Handler {
 	}
 	h.httpProxy = &httputil.ReverseProxy{
 		Rewrite:   func(*httputil.ProxyRequest) {},
-		Transport: &hookTransport{base: http.DefaultTransport, handler: h},
+		Transport: &middlewareTransport{base: http.DefaultTransport, handler: h},
 	}
 	return h
 }
 
-// OnRequest registers fn as a request interceptor hook.
-// Hooks are called in registration order before each upstream request.
-func (h *Handler) OnRequest(fn OnRequestFunc) {
+// UseRequest registers fn as a request middleware.
+// Middlewares are called in registration order before each upstream request.
+func (h *Handler) UseRequest(fn RequestFunc) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.onRequest = append(h.onRequest, fn)
+	h.requestMiddlewares = append(h.requestMiddlewares, fn)
 }
 
-// OnResponse registers fn as a response interceptor hook.
-// Hooks are called in registration order after each upstream response.
-func (h *Handler) OnResponse(fn OnResponseFunc) {
+// UseResponse registers fn as a response middleware.
+// Middlewares are called in registration order after each upstream response.
+func (h *Handler) UseResponse(fn ResponseFunc) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.onResponse = append(h.onResponse, fn)
+	h.responseMiddlewares = append(h.responseMiddlewares, fn)
 }
 
 // ServeHTTP implements [http.Handler]. CONNECT requests initiate a tunnel;
-// all other methods run OnRequest hooks then are proxied via the reverse proxy.
+// all other methods run request middlewares then are proxied via the reverse proxy.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodConnect {
 		h.handleCONNECT(w, req)
@@ -117,12 +117,12 @@ func (h *Handler) ListenAndServe(ctx context.Context, addr string) error {
 	return err
 }
 
-func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Response) {
+func (h *Handler) runRequestMiddlewares(req *http.Request) (*http.Request, *http.Response) {
 	h.mu.RLock()
-	hooks := h.onRequest
+	mws := h.requestMiddlewares
 	h.mu.RUnlock()
 	
-	for _, fn := range hooks {
+	for _, fn := range mws {
 		newReq, newResp := fn(req.Context(), req)
 		if newResp != nil {
 			return nil, newResp
@@ -132,17 +132,17 @@ func (h *Handler) runRequestHooks(req *http.Request) (*http.Request, *http.Respo
 	return req, nil
 }
 
-func (h *Handler) runResponseHooks(resp *http.Response) (*http.Response, error) {
+func (h *Handler) runResponseMiddlewares(resp *http.Response) (*http.Response, error) {
 	ctx := context.Background()
 	if resp.Request != nil {
 		ctx = resp.Request.Context()
 	}
 	
 	h.mu.RLock()
-	hooks := h.onResponse
+	mws := h.responseMiddlewares
 	h.mu.RUnlock()
 	
-	for _, fn := range hooks {
+	for _, fn := range mws {
 		newResp, err := fn(ctx, resp)
 		if err != nil {
 			return newResp, err
