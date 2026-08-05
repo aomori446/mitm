@@ -12,6 +12,7 @@ type middlewareTransport struct {
 }
 
 func (t *middlewareTransport) RoundTrip(req *http.Request) (resp *http.Response, err error) {
+	req.RequestURI = ""
 	req, resp = t.handler.runRequestMiddlewares(req)
 	if resp != nil {
 		return resp, nil
