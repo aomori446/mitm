@@ -20,6 +20,7 @@ func (t *middlewareTransport) RoundTrip(req *http.Request) (resp *http.Response,
 	
 	resp, err = t.base.RoundTrip(req)
 	if err != nil {
+		t.handler.notifyError(req.Context(), req, err)
 		return nil, err
 	}
 	

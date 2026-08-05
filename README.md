@@ -60,10 +60,25 @@ handler.UseResponse(func(ctx context.Context, resp *http.Response) (*http.Respon
     // Return a modified response, or return an error to abort.
     return resp, nil
 })
+
+handler.UseError(func(ctx context.Context, req *http.Request, err error) {
+    // The upstream round trip failed, so no response middleware runs for req.
+})
+
+handler.UseHandshakeError(func(ctx context.Context, host string, err error, d time.Duration) {
+    // A client TLS handshake against the forged certificate failed —
+    // usually the client does not trust the CA.
+})
 ```
 
 Middlewares are called in registration order. A non-nil `*http.Response` from a `UseRequest` middleware
 short-circuits the upstream request and sends the response directly to the client.
+
+Every request that reaches the upstream is followed by exactly one of the response middlewares or the
+error middlewares, so state keyed on the request can always be released.
+
+Handshake errors that are just EOF, connection reset, or a closed connection are treated as ordinary
+client probes and do not reach `UseHandshakeError`.
 
 ## Built-in Middlewares
 
@@ -148,7 +163,7 @@ go run ./examples/proxy -addr :8080 -ca-cert testdata/ca.crt -ca-key testdata/ca
 cert.go        CA loading, per-host cert forging and caching
 connect.go     CONNECT tunnel handling (MITM & TCP relay)
 handler.go     Core proxy handler (ServeHTTP, ListenAndServe, middlewares)
-relay.go       TCPRelay for transparent tunnelling
+relay.go       Bidirectional TCP relay for transparent tunnelling
 transport.go   Upstream connection pooling and middleware transport
 middleware/    Middleware types and built-in middlewares
 examples/      Runnable reference implementations

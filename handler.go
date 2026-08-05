@@ -18,6 +18,11 @@ type RequestFunc func(ctx context.Context, req *http.Request) (*http.Request, *h
 // it is written back to the client. The original request is available via resp.Request.
 type ResponseFunc func(ctx context.Context, resp *http.Response) (*http.Response, error)
 
+// ErrorFunc is called when the upstream round trip fails, so no response
+// middleware will run for req. It is the terminal callback for a request that
+// passed the request middlewares but never produced a response.
+type ErrorFunc func(ctx context.Context, req *http.Request, err error)
+
 // HandshakeErrorFunc is called when a client TLS handshake fails during CONNECT tunnel interception.
 type HandshakeErrorFunc func(ctx context.Context, host string, err error, duration time.Duration)
 
@@ -49,6 +54,7 @@ type Handler struct {
 	
 	requestMiddlewares        []RequestFunc
 	responseMiddlewares       []ResponseFunc
+	errorMiddlewares          []ErrorFunc
 	handshakeErrorMiddlewares []HandshakeErrorFunc
 
 	transports sync.Map // map[host string]*http.Transport
@@ -101,11 +107,32 @@ func (h *Handler) UseResponse(fn ResponseFunc) {
 	h.responseMiddlewares = append(h.responseMiddlewares, fn)
 }
 
+// UseError registers fn as an upstream error middleware.
+// Middlewares are called in registration order whenever an upstream round trip
+// fails. Every request that reaches the upstream is followed by exactly one of
+// the response middlewares or the error middlewares, so state keyed on the
+// request can always be released.
+func (h *Handler) UseError(fn ErrorFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.errorMiddlewares = append(h.errorMiddlewares, fn)
+}
+
 // UseHandshakeError registers fn as a handshake error middleware callback.
 func (h *Handler) UseHandshakeError(fn HandshakeErrorFunc) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.handshakeErrorMiddlewares = append(h.handshakeErrorMiddlewares, fn)
+}
+
+func (h *Handler) notifyError(ctx context.Context, req *http.Request, err error) {
+	h.mu.RLock()
+	mws := h.errorMiddlewares
+	h.mu.RUnlock()
+
+	for _, fn := range mws {
+		fn(ctx, req, err)
+	}
 }
 
 func (h *Handler) notifyHandshakeError(ctx context.Context, host string, err error, duration time.Duration) {

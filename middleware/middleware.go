@@ -14,6 +14,10 @@ type RequestFunc = mitm.RequestFunc
 // it is written back to the client. The original request is available via resp.Request.
 type ResponseFunc = mitm.ResponseFunc
 
+// ErrorFunc is called when the upstream round trip fails, so no response
+// middleware will run for the request.
+type ErrorFunc = mitm.ErrorFunc
+
 // Response constructs a standard *http.Response helper.
 func Response(status int, contentType string, body io.ReadCloser) *http.Response {
 	return mitm.Response(status, contentType, body)
