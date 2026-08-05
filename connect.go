@@ -110,6 +110,17 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		if err != nil {
 			break
 		}
+
+		// A response with no known length is delimited by the connection
+		// closing, and [http.Response.Write] says so with "Connection: close".
+		// Keeping the tunnel open after that leaves the client waiting for an
+		// EOF that never arrives — it burns one of the client's few connections
+		// per origin, and once they are all stuck the origin goes unreachable.
+		// Synthetic responses from request middlewares hit this every time,
+		// since they rarely carry a Content-Length.
+		if resp.Close || req.Close {
+			break
+		}
 	}
 }
 
