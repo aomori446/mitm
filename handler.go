@@ -18,6 +18,9 @@ type RequestFunc func(ctx context.Context, req *http.Request) (*http.Request, *h
 // it is written back to the client. The original request is available via resp.Request.
 type ResponseFunc func(ctx context.Context, resp *http.Response) (*http.Response, error)
 
+// HandshakeErrorFunc is called when a client TLS handshake fails during CONNECT tunnel interception.
+type HandshakeErrorFunc func(ctx context.Context, host string, err error, duration time.Duration)
+
 // Response constructs a standard *http.Response helper.
 func Response(status int, contentType string, body io.ReadCloser) *http.Response {
 	header := make(http.Header)
@@ -44,9 +47,10 @@ type Handler struct {
 	
 	httpProxy *httputil.ReverseProxy
 	
-	requestMiddlewares  []RequestFunc
-	responseMiddlewares []ResponseFunc
-	
+	requestMiddlewares        []RequestFunc
+	responseMiddlewares       []ResponseFunc
+	handshakeErrorMiddlewares []HandshakeErrorFunc
+
 	transports sync.Map // map[host string]*http.Transport
 }
 
@@ -67,6 +71,20 @@ func New(certMgr *CertManager) *Handler {
 	return h
 }
 
+// CertManager returns the current CertManager in a thread-safe manner.
+func (h *Handler) CertManager() *CertManager {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.certMgr
+}
+
+// SetCertManager replaces the active CertManager in a thread-safe manner.
+func (h *Handler) SetCertManager(certMgr *CertManager) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.certMgr = certMgr
+}
+
 // UseRequest registers fn as a request middleware.
 // Middlewares are called in registration order before each upstream request.
 func (h *Handler) UseRequest(fn RequestFunc) {
@@ -81,6 +99,23 @@ func (h *Handler) UseResponse(fn ResponseFunc) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.responseMiddlewares = append(h.responseMiddlewares, fn)
+}
+
+// UseHandshakeError registers fn as a handshake error middleware callback.
+func (h *Handler) UseHandshakeError(fn HandshakeErrorFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.handshakeErrorMiddlewares = append(h.handshakeErrorMiddlewares, fn)
+}
+
+func (h *Handler) notifyHandshakeError(ctx context.Context, host string, err error, duration time.Duration) {
+	h.mu.RLock()
+	mws := h.handshakeErrorMiddlewares
+	h.mu.RUnlock()
+
+	for _, fn := range mws {
+		fn(ctx, host, err, duration)
+	}
 }
 
 // ServeHTTP implements [http.Handler]. CONNECT requests initiate a tunnel;
