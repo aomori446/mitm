@@ -216,6 +216,20 @@ the exact byte count, from which the cost at any link speed follows directly.
       (at 0.21s against the 200ms bound set for the test, so it is the timeout
       doing it), and a tunnel still being used survives five times that.
 
+- [x] **8 — Forge each certificate once** (`cert.go`, `connect.go`)
+      Concurrent first connections to one host each signed their own copy;
+      `LoadOrStore` deduped the storing but not the work. A `singleflight.Group`
+      now collapses them. Sixteen simultaneous first connections: 319.5 -> 152.3
+      us (-52.3%), 139.5 -> 20.6 KiB (-85.2%), 2420 -> 354 allocs (-85.4%).
+
+      Also fixed the name the certificate is issued for. A client addressing an
+      IP address sends no SNI — SNI carries host names only — and used to get a
+      certificate with no subject alternative name, cached under `""`, that no
+      checking client would accept; `forgeCert`'s IP branch was unreachable.
+      `tunnelConn` now carries the CONNECT authority down to GetCertificate,
+      which cannot be a closure because the config is shared. With neither SNI
+      nor a target, the handshake now fails with a reason.
+
 ## Next
 
 ## Found but not scheduled
@@ -231,11 +245,6 @@ the exact byte count, from which the cost at any link speed follows directly.
   `bufio.NewWriterSize(tlsDownstream, 16<<10)` would get it to about 5 — at 16 KB
   of memory per tunnel, which fights the idle-tunnel item above. Deliberately
   skipped. Note h2 already does better here: 10 records for the same body.
-
-- **`forgeCert` thundering herd** (`cert.go`). Concurrent first connections to
-  one host each forge a certificate (~hundreds of µs, P-256); `LoadOrStore`
-  dedupes the storing but not the work. Wants `singleflight` or a per-host
-  `sync.Once`. Also: an empty SNI caches a certificate under `""` with no SAN.
 
 - **Middleware slices are read under `RLock` twice per request**
   (`handler.go:183`, `handler.go:197`). Tiny, but registration is a startup-time

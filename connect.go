@@ -61,9 +61,18 @@ func (h *Handler) handleCONNECTWithoutMITM(ctx context.Context, downstream net.C
 	}
 }
 
+// tunnelConn carries the CONNECT authority alongside the connection, so that
+// the shared [tls.Config]'s GetCertificate can recover it. The config is shared
+// across every tunnel — it has to be, or session resumption breaks — so the
+// target cannot be captured in a closure, and SNI does not always supply it.
+type tunnelConn struct {
+	net.Conn
+	host string
+}
+
 func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn, host string, certMgr *CertManager) {
 	start := time.Now()
-	tlsDownstream := tls.Server(downstream, certMgr.TLSConfig())
+	tlsDownstream := tls.Server(&tunnelConn{Conn: downstream, host: host}, certMgr.TLSConfig())
 	if err := tlsDownstream.Handshake(); err != nil {
 		if !isEOFOrClosed(err) {
 			slog.Error("TLS handshake with client failed", "addr", downstream.RemoteAddr().String(), "error", err)

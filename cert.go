@@ -8,11 +8,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type CertManager struct {
@@ -20,6 +23,7 @@ type CertManager struct {
 	caKey       *ecdsa.PrivateKey
 	leafKey     *ecdsa.PrivateKey
 	cachedCerts sync.Map // map[host string]*tls.Certificate
+	forging     singleflight.Group
 
 	tlsConfig *tls.Config
 }
@@ -34,7 +38,7 @@ func NewCertManager(certFile, keyFile string) (*CertManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	keyPEM, err := os.ReadFile(keyFile)
 	if err != nil {
 		return nil, err
@@ -44,12 +48,12 @@ func NewCertManager(certFile, keyFile string) (*CertManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	m := &CertManager{
 		caCert:  caCert,
 		caKey:   caKey,
@@ -77,23 +81,71 @@ func (m *CertManager) TLSConfig() *tls.Config {
 }
 
 func (m *CertManager) getCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	host := info.ServerName
-
-	if v, ok := m.cachedCerts.Load(host); ok {
-		cert := v.(*tls.Certificate)
-		if time.Now().Add(time.Hour).Before(cert.Leaf.NotAfter) {
-			return cert, nil
-		}
-		m.cachedCerts.Delete(host)
+	host := certificateNameFor(info)
+	if host == "" {
+		// Nothing to put in the certificate. One carrying neither a subject
+		// alternative name nor a usable common name is rejected by every client
+		// that checks, so fail the handshake and say why rather than cache a
+		// certificate that cannot work.
+		return nil, errors.New("mitm: no server name from SNI or from the CONNECT target")
 	}
 
-	cert, err := m.forgeCert(host)
+	if cert, ok := m.cachedCert(host); ok {
+		return cert, nil
+	}
+
+	// Forge once per host however many connections arrive together. A browser
+	// opens several at a time to a host it has just resolved, and without this
+	// each of them signs its own copy of the same certificate before one of
+	// them wins the race to store it.
+	v, err, _ := m.forging.Do(host, func() (any, error) {
+		if cert, ok := m.cachedCert(host); ok {
+			return cert, nil
+		}
+		cert, err := m.forgeCert(host)
+		if err != nil {
+			return nil, err
+		}
+		m.cachedCerts.Store(host, cert)
+		return cert, nil
+	})
 	if err != nil {
 		return nil, err
 	}
+	return v.(*tls.Certificate), nil
+}
 
-	actual, _ := m.cachedCerts.LoadOrStore(host, cert)
-	return actual.(*tls.Certificate), nil
+// certificateNameFor picks the name to issue a certificate for. SNI is the
+// normal source, but a client addressing an IP address does not send SNI at
+// all — SNI carries host names only — so fall back to the authority from the
+// CONNECT request, which [tunnelConn] carries down to here.
+func certificateNameFor(info *tls.ClientHelloInfo) string {
+	if info.ServerName != "" {
+		return info.ServerName
+	}
+	tc, ok := info.Conn.(*tunnelConn)
+	if !ok {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(tc.host); err == nil {
+		return host
+	}
+	return tc.host
+}
+
+// cachedCert returns the stored certificate for host while it has more than an
+// hour left to run, so that a connection is never handed one about to expire.
+func (m *CertManager) cachedCert(host string) (*tls.Certificate, bool) {
+	v, ok := m.cachedCerts.Load(host)
+	if !ok {
+		return nil, false
+	}
+	cert := v.(*tls.Certificate)
+	if time.Now().Add(time.Hour).Before(cert.Leaf.NotAfter) {
+		return cert, true
+	}
+	m.cachedCerts.Delete(host)
+	return nil, false
 }
 
 func (m *CertManager) forgeCert(host string) (*tls.Certificate, error) {
@@ -101,7 +153,7 @@ func (m *CertManager) forgeCert(host string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
@@ -114,18 +166,18 @@ func (m *CertManager) forgeCert(host string) (*tls.Certificate, error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 	}
-	
+
 	if ip := net.ParseIP(host); ip != nil {
 		template.IPAddresses = []net.IP{ip}
 	} else {
 		template.DNSNames = []string{host}
 	}
-	
+
 	certDER, err := x509.CreateCertificate(rand.Reader, template, m.caCert, &m.leafKey.PublicKey, m.caKey)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	cert := &tls.Certificate{
 		Certificate: [][]byte{certDER},
 		PrivateKey:  m.leafKey,
@@ -139,12 +191,12 @@ func GenerateCA(certOut, keyOut string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return err
 	}
-	
+
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
@@ -159,12 +211,12 @@ func GenerateCA(certOut, keyOut string) error {
 		MaxPathLen:            0,
 		MaxPathLenZero:        true,
 	}
-	
+
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
 	if err != nil {
 		return err
 	}
-	
+
 	certFile, err := os.Create(certOut)
 	if err != nil {
 		return err
@@ -173,7 +225,7 @@ func GenerateCA(certOut, keyOut string) error {
 	if err = pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
 		return err
 	}
-	
+
 	keyFile, err := os.Create(keyOut)
 	if err != nil {
 		return err
