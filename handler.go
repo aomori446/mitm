@@ -57,7 +57,7 @@ type Handler struct {
 	errorMiddlewares          []ErrorFunc
 	handshakeErrorMiddlewares []HandshakeErrorFunc
 
-	transports sync.Map // map[host string]*http.Transport
+	upstream *http.Transport
 }
 
 // New creates a Handler. Providing a non-nil certMgr enables TLS interception;
@@ -68,7 +68,8 @@ type Handler struct {
 // promptly when the server stops.
 func New(certMgr *CertManager) *Handler {
 	h := &Handler{
-		certMgr: certMgr,
+		certMgr:  certMgr,
+		upstream: newUpstreamTransport(),
 	}
 	h.httpProxy = &httputil.ReverseProxy{
 		Rewrite:   func(*httputil.ProxyRequest) {},

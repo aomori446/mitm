@@ -100,25 +100,21 @@ the exact byte count, from which the cost at any link speed follows directly.
       130 → 65; steady-state request 154.1 µs → 40.4 µs. Most of the time saved
       is context switches — the client no longer wakes fifty times per response.
 
+- [x] **3 — Upstream transport lifecycle** (`transport.go`, `handler.go`,
+      `connect.go`, `transport_internal_test.go`)
+      `h.transports` (a `sync.Map` keyed by host) only ever grew: every host ever
+      seen kept a `*http.Transport` and its pool forever. `IdleConnTimeout` was
+      unset, so its zero value kept idle connections alive indefinitely, with no
+      `MaxIdleConns` ceiling. `tls.Dialer` had no `Timeout`.
+
+      Replaced with one shared bounded transport built in `New`. Retention per
+      distinct host 1092 B → 0.33 B and 8.38 objects → 0.001; at 5000 hosts that
+      is 5.5 MB retained versus none. The guard tests failed before the change
+      and pass after.
+
 ## Next
 
-- [ ] **3 — Upstream transport lifecycle** (`transport.go`) ← in progress
-      `h.transports` (a `sync.Map` keyed by host) only ever grows: every host
-      ever seen keeps a `*http.Transport` and its pool forever. `IdleConnTimeout`
-      is unset, so its zero value keeps idle connections alive indefinitely, and
-      there is no `MaxIdleConns` ceiling — idle connections are bounded only by
-      host count × 10. `tls.Dialer` has no `Timeout`, so a single dial is
-      unbounded except by the request context.
-
-      Fix: one shared `*http.Transport`. `http.Transport` already keys its pool
-      by host:port, so per-host transports buy no isolation the pool does not
-      already provide, and they cost a map entry per host forever. Set
-      `IdleConnTimeout`, `MaxIdleConns`, and a dial timeout on the shared one.
-
-      Measured by `transport_internal_test.go` (written, not yet run): retained
-      heap per host, plus guard tests asserting the pool bounds.
-
-- [ ] **4 — HTTP/2** (`connect.go`, `transport.go`)
+- [ ] **4 — HTTP/2** (`connect.go`, `transport.go`) ← next
       The proxy currently forces every site down to HTTP/1.1 even when client
       and origin both speak h2. `transport.go` pins `NextProtos: ["http/1.1"]`
       upstream, and the client side runs an `http.ReadRequest` loop that can only

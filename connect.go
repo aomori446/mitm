@@ -82,7 +82,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 	}()
 	
 	mitmTransport := &middlewareTransport{
-		base:    h.transportFor(host),
+		base:    h.upstream,
 		handler: h,
 	}
 	
