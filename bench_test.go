@@ -15,9 +15,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"bufio"
+
 	"github.com/aomori446/mitm"
+	"golang.org/x/net/http2"
 )
 
 // This file is a measurement harness, not a correctness suite. Every benchmark
@@ -110,7 +113,7 @@ func startProxy(tb testing.TB, setup func(*mitm.Handler)) string {
 // syntheticResponder short-circuits every request with a response of the given
 // body size and a realistic header count, so the benchmark exercises the
 // client-facing half of the proxy without an upstream in the measurement.
-func syntheticResponder(bodySize int) mitm.RequestFunc {
+func syntheticResponder(bodySize int, originLatency time.Duration) mitm.RequestFunc {
 	body := strings.Repeat("x", bodySize)
 	headers := http.Header{}
 	for k, v := range map[string]string{
@@ -131,6 +134,12 @@ func syntheticResponder(bodySize int) mitm.RequestFunc {
 	}
 
 	return func(_ context.Context, _ *http.Request) (*http.Request, *http.Response) {
+		// Stand in for the origin's round trip. Without it every response is
+		// instant, and a benchmark of concurrency measures nothing: whether
+		// requests overlap only matters when they take time.
+		if originLatency > 0 {
+			time.Sleep(originLatency)
+		}
 		h := headers.Clone()
 		return nil, &http.Response{
 			StatusCode:    http.StatusOK,
@@ -200,19 +209,18 @@ func (c *recordCounter) scan(data []byte) {
 
 // ------------------------------------------------------------ tunnel dialing
 
-// dialTunnel opens a CONNECT tunnel through the proxy and completes the inner
+// openTunnel opens a CONNECT tunnel through the proxy and completes the inner
 // TLS handshake, returning the TLS connection and its record counter.
-func dialTunnel(tb testing.TB, proxyAddr, host string, cfg *tls.Config) (*tls.Conn, *recordCounter) {
-	tb.Helper()
+func openTunnel(proxyAddr, host string, cfg *tls.Config) (*tls.Conn, *recordCounter, error) {
 	raw, err := net.Dial("tcp", proxyAddr)
 	if err != nil {
-		tb.Fatalf("dial proxy: %v", err)
+		return nil, nil, fmt.Errorf("dial proxy: %w", err)
 	}
 
 	target := host + ":443"
 	if _, err := fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
 		raw.Close()
-		tb.Fatalf("write CONNECT: %v", err)
+		return nil, nil, fmt.Errorf("write CONNECT: %w", err)
 	}
 
 	// The proxy writes the 200 in a single Write and then stays silent until
@@ -221,11 +229,11 @@ func dialTunnel(tb testing.TB, proxyAddr, host string, cfg *tls.Config) (*tls.Co
 	n, err := raw.Read(buf[:])
 	if err != nil {
 		raw.Close()
-		tb.Fatalf("read CONNECT reply: %v", err)
+		return nil, nil, fmt.Errorf("read CONNECT reply: %w", err)
 	}
 	if !strings.HasPrefix(string(buf[:n]), "HTTP/1.1 200") {
 		raw.Close()
-		tb.Fatalf("unexpected CONNECT reply: %q", buf[:n])
+		return nil, nil, fmt.Errorf("unexpected CONNECT reply: %q", buf[:n])
 	}
 
 	counter := &recordCounter{Conn: raw}
@@ -233,9 +241,80 @@ func dialTunnel(tb testing.TB, proxyAddr, host string, cfg *tls.Config) (*tls.Co
 	conn := tls.Client(counter, cfg)
 	if err := conn.Handshake(); err != nil {
 		conn.Close()
-		tb.Fatalf("inner TLS handshake: %v", err)
+		return nil, nil, fmt.Errorf("inner TLS handshake: %w", err)
+	}
+	return conn, counter, nil
+}
+
+func dialTunnel(tb testing.TB, proxyAddr, host string, cfg *tls.Config) (*tls.Conn, *recordCounter) {
+	tb.Helper()
+	conn, counter, err := openTunnel(proxyAddr, host, cfg)
+	if err != nil {
+		tb.Fatal(err)
 	}
 	return conn, counter
+}
+
+// newHTTP2Client returns a client whose single h2 connection runs inside a
+// CONNECT tunnel, plus the record counter for that tunnel.
+func newHTTP2Client(tb testing.TB, proxyAddr, host string, pool *x509.CertPool) (*http.Client, func() *recordCounter) {
+	tb.Helper()
+	var mu sync.Mutex
+	var counters []*recordCounter
+
+	tr := &http2.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			ServerName: host,
+			NextProtos: []string{"h2"},
+		},
+		DialTLSContext: func(_ context.Context, _, _ string, cfg *tls.Config) (net.Conn, error) {
+			conn, counter, err := openTunnel(proxyAddr, host, cfg)
+			if err != nil {
+				return nil, err
+			}
+			if conn.ConnectionState().NegotiatedProtocol != "h2" {
+				conn.Close()
+				return nil, fmt.Errorf("proxy did not negotiate h2, got %q",
+					conn.ConnectionState().NegotiatedProtocol)
+			}
+			mu.Lock()
+			counters = append(counters, counter)
+			mu.Unlock()
+			return conn, nil
+		},
+	}
+	tb.Cleanup(tr.CloseIdleConnections)
+
+	sum := func() *recordCounter {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(counters) != 1 {
+			tb.Fatalf("expected exactly one h2 connection, got %d", len(counters))
+		}
+		return counters[0]
+	}
+	return &http.Client{Transport: tr}, sum
+}
+
+// getOnce issues one request through client and drains the response.
+func getOnce(tb testing.TB, client *http.Client, host string) {
+	tb.Helper()
+	req, err := http.NewRequest(http.MethodGet, "https://"+host+"/index.html", nil)
+	if err != nil {
+		tb.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("User-Agent", "mitm-bench/1")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	resp, err := client.Do(req)
+	if err != nil {
+		tb.Fatalf("h2 request: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		tb.Fatalf("drain body: %v", err)
+	}
+	resp.Body.Close()
 }
 
 // exchange writes one request over the tunnel and fully drains the response.
@@ -272,7 +351,7 @@ func BenchmarkTunnelHandshake(b *testing.B) {
 	const host = "bench.example.com"
 	_, pool := testCA(b)
 	addr := startProxy(b, func(h *mitm.Handler) {
-		h.UseRequest(syntheticResponder(1024))
+		h.UseRequest(syntheticResponder(1024, 0))
 	})
 
 	cfg := &tls.Config{
@@ -316,7 +395,7 @@ func BenchmarkTunnelRequest(b *testing.B) {
 	for _, size := range []int{0, 1 << 10, 64 << 10} {
 		b.Run(fmt.Sprintf("body=%s", byteLabel(size)), func(b *testing.B) {
 			addr := startProxy(b, func(h *mitm.Handler) {
-				h.UseRequest(syntheticResponder(size))
+				h.UseRequest(syntheticResponder(size, 0))
 			})
 			cfg := &tls.Config{RootCAs: pool, ServerName: host}
 			conn, counter := dialTunnel(b, addr, host, cfg)
@@ -352,4 +431,178 @@ func byteLabel(n int) string {
 	default:
 		return fmt.Sprintf("%dB", n)
 	}
+}
+
+// -------------------------------------------------------------- benchmark: C
+
+// BenchmarkTunnelRequestHTTP2 is BenchmarkTunnelRequest over a client that
+// negotiated h2, so the two can be read side by side from one run. The headers
+// are identical; what differs is HPACK, which sends a repeated header as an
+// index into a table rather than as text.
+func BenchmarkTunnelRequestHTTP2(b *testing.B) {
+	const host = "bench.example.com"
+	_, pool := testCA(b)
+
+	for _, size := range []int{0, 1 << 10, 64 << 10} {
+		b.Run(fmt.Sprintf("body=%s", byteLabel(size)), func(b *testing.B) {
+			addr := startProxy(b, func(h *mitm.Handler) {
+				h.UseRequest(syntheticResponder(size, 0))
+			})
+			client, counter := newHTTP2Client(b, addr, host, pool)
+
+			// Warm the connection: the first request pays for the h2 preface
+			// and seeds the HPACK table that later requests index into.
+			getOnce(b, client, host)
+
+			c := counter()
+			c.reset()
+			b.SetBytes(int64(size))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				getOnce(b, client, host)
+			}
+			b.StopTimer()
+
+			b.ReportMetric(float64(c.records.Load())/float64(b.N), "records/op")
+			b.ReportMetric(float64(c.wireBytes.Load())/float64(b.N), "wireB/op")
+		})
+	}
+}
+
+// -------------------------------------------------------------- benchmark: D
+
+// BenchmarkPageLoad models what a browser actually does with a page: fetch many
+// small resources from one origin, as concurrently as the protocol allows.
+//
+// Over HTTP/1.1 that means opening several tunnels and running each serially,
+// because a connection answers one request at a time in order. Over h2 it means
+// one tunnel carrying every request at once. The origin latency is what makes
+// the difference visible — with instant responses there is nothing to overlap.
+func BenchmarkPageLoad(b *testing.B) {
+	const (
+		host          = "bench.example.com"
+		resources     = 50
+		originLatency = 20 * time.Millisecond
+		h1Conns       = 6 // what browsers open per origin
+	)
+	_, pool := testCA(b)
+	addr := startProxy(b, func(h *mitm.Handler) {
+		h.UseRequest(syntheticResponder(2048, originLatency))
+	})
+
+	b.Run("h1-6-tunnels", func(b *testing.B) {
+		cfg := &tls.Config{RootCAs: pool, ServerName: host, NextProtos: []string{"http/1.1"}}
+		conns := make([]*tls.Conn, h1Conns)
+		readers := make([]*bufio.Reader, h1Conns)
+		for i := range conns {
+			conns[i], _ = dialTunnel(b, addr, host, cfg)
+			readers[i] = bufio.NewReader(conns[i])
+			defer conns[i].Close()
+			exchange(b, conns[i], readers[i], host)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			var wg sync.WaitGroup
+			queue := make(chan int, resources)
+			for r := range resources {
+				queue <- r
+			}
+			close(queue)
+			for i := range conns {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					for range queue {
+						exchange(b, conns[i], readers[i], host)
+					}
+				}(i)
+			}
+			wg.Wait()
+		}
+	})
+
+	b.Run("h2-1-tunnel", func(b *testing.B) {
+		client, _ := newHTTP2Client(b, addr, host, pool)
+		getOnce(b, client, host)
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			var wg sync.WaitGroup
+			wg.Add(resources)
+			for range resources {
+				go func() {
+					defer wg.Done()
+					getOnce(b, client, host)
+				}()
+			}
+			wg.Wait()
+		}
+	})
+}
+
+// ------------------------------------------------------------------- correctness
+
+// TestProtocolNegotiation checks that both paths through the tunnel produce the
+// same response. A client that asks for h2 must get h2, and a client that does
+// not offer ALPN at all must still be served by the HTTP/1.1 loop — adding h2
+// must not strand older clients.
+func TestProtocolNegotiation(t *testing.T) {
+	const host = "bench.example.com"
+	_, pool := testCA(t)
+	addr := startProxy(t, func(h *mitm.Handler) {
+		h.UseRequest(syntheticResponder(1024, 0))
+	})
+
+	t.Run("no-alpn-falls-back-to-http1.1", func(t *testing.T) {
+		conn, _ := dialTunnel(t, addr, host, &tls.Config{RootCAs: pool, ServerName: host})
+		defer conn.Close()
+		if got := conn.ConnectionState().NegotiatedProtocol; got != "" {
+			t.Fatalf("negotiated %q, want none", got)
+		}
+		resp := exchange(t, conn, bufio.NewReader(conn), host)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+		if got := resp.Header.Get("Etag"); got != `W/"1a2b3c4d5e6f"` {
+			t.Errorf("Etag = %q, header did not survive the h1 path", got)
+		}
+		if resp.ContentLength != 1024 {
+			t.Errorf("ContentLength = %d, want 1024", resp.ContentLength)
+		}
+	})
+
+	t.Run("h2-is-negotiated-and-served", func(t *testing.T) {
+		client, counter := newHTTP2Client(t, addr, host, pool)
+		req, err := http.NewRequest(http.MethodGet, "https://"+host+"/index.html", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("h2 request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.ProtoMajor != 2 {
+			t.Errorf("response proto = %s, want HTTP/2", resp.Proto)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+		if got := resp.Header.Get("Etag"); got != `W/"1a2b3c4d5e6f"` {
+			t.Errorf("Etag = %q, header did not survive the h2 path", got)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if len(body) != 1024 {
+			t.Errorf("body = %d bytes, want 1024", len(body))
+		}
+		counter() // asserts exactly one h2 connection carried all of it
+	})
 }

@@ -114,34 +114,45 @@ the exact byte count, from which the cost at any link speed follows directly.
 
 ## Next
 
-- [ ] **4 — HTTP/2** (`connect.go`, `transport.go`) ← next
-      The proxy currently forces every site down to HTTP/1.1 even when client
-      and origin both speak h2. `transport.go` pins `NextProtos: ["http/1.1"]`
-      upstream, and the client side runs an `http.ReadRequest` loop that can only
-      parse h1.
+- [x] **4 — HTTP/2 on the client side** (`cert.go`, `connect.go`)
+      The proxy forced every site down to HTTP/1.1 even when the client spoke
+      h2. Now the forged config offers `["h2", "http/1.1"]`, and a tunnel that
+      negotiates h2 is handed to `http2.Server.ServeConn` with a
+      `httputil.ReverseProxy` handler; anything else still runs the HTTP/1.1
+      loop. Added `golang.org/x/net`.
 
-      Note on why the h1 loop is *not* worth parallelising: HTTP/1.1 has no
-      request ID (clients match responses by order), the request body shares the
-      byte stream with the next request (so request N+1 cannot even be read
-      before N's body is drained), and browsers disabled pipelining years ago —
-      so a tunnel never has more than one request outstanding. Cross-connection
-      concurrency already exists: a browser opens ~6 tunnels per origin and
-      `http.Server` gives each its own goroutine.
+      Header-only response 510 -> 45 wire bytes (HPACK). Page load of 50
+      resources at 20 ms origin latency: 191.4 ms over six h1 tunnels -> 24.3 ms
+      over one h2 tunnel (7.9x). Costs a single serialized request 37.8 ->
+      78.7 us and 65 -> 139 allocs; h2 framing only pays off under concurrency.
 
-      Fix: advertise `NextProtos: ["h2", "http/1.1"]` on the forged config; after
-      the handshake, when `ConnectionState().NegotiatedProtocol == "h2"`, hand
-      the conn to `http2.Server.ServeConn` with an `http.Handler` running the
-      existing middleware + `RoundTrip`, instead of the `ReadRequest` loop. Keep
-      the h1 loop for h1 clients. Drop the upstream `NextProtos` pin. Needs
-      `golang.org/x/net/http2`; middleware signatures are unaffected since it is
-      still `*http.Request` / `*http.Response`.
+- [ ] **5 — HTTP/2 upstream** (`transport.go`) ← next
+      `newUpstreamTransport` still pins `NextProtos: ["http/1.1"]` on the
+      upstream dial, so the proxy opens a separate h1 connection per concurrent
+      request even when the origin offers h2. Dropping the pin needs
+      `ForceAttemptHTTP2: true`, because `http.Transport` does not enable h2
+      automatically once `DialTLSContext` is set. Consider dropping
+      `DialTLSContext` entirely in favour of `DialContext` + `TLSClientConfig`,
+      which also makes `TLSHandshakeTimeout` apply — it does not today.
 
-      Buys real per-connection concurrency (stream IDs, so ordering is not
-      required), HPACK — the measured 510 wire bytes per response should drop to
-      tens of bytes since repeated headers become index references — and one TLS
-      handshake instead of six, which compounds with change 1.
+      **Blocked on measurement.** Exercising the upstream needs origin servers
+      the proxy trusts, and there is currently no way to inject a transport, a
+      TLS config or a root pool. That gap is worth closing on its own merits
+      (proxy chaining, corporate roots, testing); doing so is the prerequisite
+      for measuring anything upstream. Everything measured so far short-circuits
+      at a request middleware and never reaches the upstream at all.
+
+- [ ] **6 — Tune the h2 server's buffers** (`connect.go`)
+      h2 costs 45.9 KiB/op against h1's 9.6 KiB/op, and a page load allocates
+      2.56 MiB against 492 KiB. `http2.Server`'s
+      `MaxUploadBufferPerConnection` and `MaxUploadBufferPerStream` default to
+      1 MB each. Worth measuring before picking numbers.
 
 ## Found but not scheduled
+
+- **No way to configure the upstream side.** No exported hook sets the upstream
+  transport, its TLS config or its root pool. Blocks item 5's measurement, and
+  also blocks proxy chaining and custom roots for users.
 
 - **Idle tunnels are never timed out** (`connect.go`, the `ReadRequest` loop).
   Exits only on error or close, so an idle keep-alive tunnel holds two
@@ -153,7 +164,7 @@ the exact byte count, from which the cost at any link speed follows directly.
   ~3.9 KB per record against TLS's 16 KB ceiling.
   `bufio.NewWriterSize(tlsDownstream, 16<<10)` would get it to about 5 — at 16 KB
   of memory per tunnel, which fights the idle-tunnel item above. Deliberately
-  skipped.
+  skipped. Note h2 already does better here: 10 records for the same body.
 
 - **`forgeCert` thundering herd** (`cert.go`). Concurrent first connections to
   one host each forge a certificate (~hundreds of µs, P-256); `LoadOrStore`

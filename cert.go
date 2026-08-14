@@ -55,7 +55,15 @@ func NewCertManager(certFile, keyFile string) (*CertManager, error) {
 		caKey:   caKey,
 		leafKey: leafKey,
 	}
-	m.tlsConfig = &tls.Config{GetCertificate: m.getCertificate}
+	m.tlsConfig = &tls.Config{
+		GetCertificate: m.getCertificate,
+		// Offer h2 first. A client that takes it multiplexes its concurrent
+		// requests over this one tunnel and compresses their headers, instead
+		// of opening a handful of tunnels that each repeat every header in
+		// full. Clients that do not speak it, or do not use ALPN at all, land
+		// on http/1.1 and are served by the HTTP/1.1 loop as before.
+		NextProtos: []string{"h2", "http/1.1"},
+	}
 	return m, nil
 }
 
