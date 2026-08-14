@@ -47,17 +47,17 @@ func Response(status int, contentType string, body io.ReadCloser) *http.Response
 // TLS interception (MITM) on CONNECT tunnels when a [CertManager] is provided.
 type Handler struct {
 	mu sync.RWMutex
-	
+
 	certMgr *CertManager // nil means plain TCP relay (no MITM)
-	
+
 	httpProxy *httputil.ReverseProxy
-	
+
 	requestMiddlewares        []RequestFunc
 	responseMiddlewares       []ResponseFunc
 	errorMiddlewares          []ErrorFunc
 	handshakeErrorMiddlewares []HandshakeErrorFunc
 
-	upstream *http.Transport
+	upstream http.RoundTripper
 }
 
 // New creates a Handler. Providing a non-nil certMgr enables TLS interception;
@@ -90,6 +90,31 @@ func (h *Handler) SetCertManager(certMgr *CertManager) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.certMgr = certMgr
+}
+
+// UpstreamTransport returns the round tripper used for requests recovered from
+// intercepted tunnels, in a thread-safe manner.
+func (h *Handler) UpstreamTransport() http.RoundTripper {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.upstream
+}
+
+// SetUpstreamTransport replaces the round tripper used for requests recovered
+// from intercepted tunnels, in a thread-safe manner.
+//
+// The default is tuned for a proxy: one pooled transport for every host, with
+// an idle timeout and a ceiling so a long-lived process does not accumulate
+// connections it will never use again. Replace it to reach origins through
+// another proxy, to trust a private certificate authority, or to observe
+// upstream traffic in a test. Middlewares still run around whatever is set
+// here; this replaces only the round trip itself.
+//
+// Requests already in flight keep the previous transport.
+func (h *Handler) SetUpstreamTransport(rt http.RoundTripper) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.upstream = rt
 }
 
 // UseRequest registers fn as a request middleware.
@@ -153,7 +178,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.handleCONNECT(w, req)
 		return
 	}
-	
+
 	h.httpProxy.ServeHTTP(w, req)
 }
 
@@ -184,7 +209,7 @@ func (h *Handler) runRequestMiddlewares(req *http.Request) (*http.Request, *http
 	h.mu.RLock()
 	mws := h.requestMiddlewares
 	h.mu.RUnlock()
-	
+
 	for _, fn := range mws {
 		newReq, newResp := fn(req.Context(), req)
 		if newResp != nil {
@@ -200,11 +225,11 @@ func (h *Handler) runResponseMiddlewares(resp *http.Response) (*http.Response, e
 	if resp.Request != nil {
 		ctx = resp.Request.Context()
 	}
-	
+
 	h.mu.RLock()
 	mws := h.responseMiddlewares
 	h.mu.RUnlock()
-	
+
 	for _, fn := range mws {
 		newResp, err := fn(ctx, resp)
 		if err != nil {

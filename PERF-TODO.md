@@ -126,7 +126,15 @@ the exact byte count, from which the cost at any link speed follows directly.
       over one h2 tunnel (7.9x). Costs a single serialized request 37.8 ->
       78.7 us and 65 -> 139 allocs; h2 framing only pays off under concurrency.
 
-- [ ] **5 — HTTP/2 upstream** (`transport.go`) ← next
+- [x] **5a — Expose the upstream transport** (`handler.go`)
+      `UpstreamTransport` / `SetUpstreamTransport`, guarded by the existing
+      mutex. No performance change of its own; it unblocks measuring anything
+      upstream, and it is what users need for proxy chaining and private roots.
+      `TestUpstreamRoundTrip` is the first test that reaches a real origin, and
+      the first to show a response middleware running on a response the proxy
+      did not invent — over both the h1 and h2 client paths.
+
+- [ ] **5b — HTTP/2 upstream** (`transport.go`) ← next
       `newUpstreamTransport` still pins `NextProtos: ["http/1.1"]` on the
       upstream dial, so the proxy opens a separate h1 connection per concurrent
       request even when the origin offers h2. Dropping the pin needs
@@ -135,12 +143,11 @@ the exact byte count, from which the cost at any link speed follows directly.
       `DialTLSContext` entirely in favour of `DialContext` + `TLSClientConfig`,
       which also makes `TLSHandshakeTimeout` apply — it does not today.
 
-      **Blocked on measurement.** Exercising the upstream needs origin servers
-      the proxy trusts, and there is currently no way to inject a transport, a
-      TLS config or a root pool. That gap is worth closing on its own merits
-      (proxy chaining, corporate roots, testing); doing so is the prerequisite
-      for measuring anything upstream. Everything measured so far short-circuits
-      at a request middleware and never reaches the upstream at all.
+      Now measurable: `startOrigin` in `bench_test.go` runs a trusted TLS origin
+      (optionally h2) and hands back a transport to install with
+      `SetUpstreamTransport`. A benchmark for 5b wants concurrent requests
+      against an h2-capable origin with realistic latency, comparing upstream
+      connection counts and wall time against the h1 pin.
 
 - [ ] **6 — Tune the h2 server's buffers** (`connect.go`)
       h2 costs 45.9 KiB/op against h1's 9.6 KiB/op, and a page load allocates
@@ -150,9 +157,10 @@ the exact byte count, from which the cost at any link speed follows directly.
 
 ## Found but not scheduled
 
-- **No way to configure the upstream side.** No exported hook sets the upstream
-  transport, its TLS config or its root pool. Blocks item 5's measurement, and
-  also blocks proxy chaining and custom roots for users.
+- **The plain-HTTP path ignores the upstream transport.** `h.httpProxy` still
+  uses `http.DefaultTransport`, so `SetUpstreamTransport` does not affect
+  non-CONNECT requests. Worth aligning in 5b, once the transport handles plain
+  http:// as well as it handles https.
 
 - **Idle tunnels are never timed out** (`connect.go`, the `ReadRequest` loop).
   Exits only on error or close, so an idle keep-alive tunnel holds two

@@ -90,7 +90,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 	}
 
 	mitmTransport := &middlewareTransport{
-		base:    h.upstream,
+		base:    h.UpstreamTransport(),
 		handler: h,
 	}
 
@@ -177,7 +177,7 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn *tls.Conn, host string) {
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = host
 		},
-		Transport: &middlewareTransport{base: h.upstream, handler: h},
+		Transport: &middlewareTransport{base: h.UpstreamTransport(), handler: h},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			slog.Error("MITM round trip failed", "error", err)
 			w.WriteHeader(http.StatusBadGateway)

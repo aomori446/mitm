@@ -52,8 +52,10 @@ func BenchmarkTransportRetention(b *testing.B) {
 // IdleConnTimeout of zero means idle connections are kept forever, which on a
 // proxy is unbounded: it is the one field whose zero value is a leak.
 func TestUpstreamTransportIsBounded(t *testing.T) {
-	h := New(nil)
-	tr := routeUpstream(h, "example.com:443")
+	tr, ok := routeUpstream(New(nil), "example.com:443").(*http.Transport)
+	if !ok {
+		t.Fatal("the default upstream is not an *http.Transport")
+	}
 
 	if tr.IdleConnTimeout == 0 {
 		t.Error("IdleConnTimeout is 0: idle upstream connections are never reaped")
@@ -84,7 +86,7 @@ func TestTransportIsSharedAcrossHosts(t *testing.T) {
 // these measurements track the real routing decision rather than a stand-in.
 // The host is deliberately unused: that it does not matter is the property
 // under test.
-func routeUpstream(h *Handler, host string) *http.Transport {
+func routeUpstream(h *Handler, host string) http.RoundTripper {
 	_ = host
-	return h.upstream
+	return h.UpstreamTransport()
 }

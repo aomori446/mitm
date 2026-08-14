@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -604,5 +605,108 @@ func TestProtocolNegotiation(t *testing.T) {
 			t.Errorf("body = %d bytes, want 1024", len(body))
 		}
 		counter() // asserts exactly one h2 connection carried all of it
+	})
+}
+
+// ----------------------------------------------------------------- upstream
+
+// startOrigin runs a TLS origin the proxy can actually reach, and returns the
+// host name to address it by plus a transport that trusts it.
+//
+// Everything else in this file short-circuits at a request middleware and never
+// performs an upstream round trip, because the default upstream transport
+// verifies against the system roots and no test can put a certificate there.
+// The transport returned here is installed with SetUpstreamTransport: it trusts
+// the origin's own certificate and sends every host to it, so the proxy dials
+// "example.com:443" and lands on the local server.
+func startOrigin(tb testing.TB, enableHTTP2 bool, handler http.Handler) (string, *http.Transport) {
+	tb.Helper()
+	srv := httptest.NewUnstartedServer(handler)
+	srv.EnableHTTP2 = enableHTTP2
+	srv.StartTLS()
+	tb.Cleanup(srv.Close)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	addr := srv.Listener.Addr().String()
+
+	return "example.com", &http.Transport{
+		// httptest's certificate is issued for example.com, so the proxy's own
+		// verification of the origin stays real; only the address is redirected.
+		TLSClientConfig:   &tls.Config{RootCAs: pool},
+		ForceAttemptHTTP2: enableHTTP2,
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	}
+}
+
+// TestUpstreamRoundTrip drives a request all the way through: client, tunnel,
+// proxy, real origin, and back. It is the first test that reaches an upstream
+// at all, and so the first that can show response middlewares running on a
+// response the proxy did not invent — over both the h1 and the h2 client path.
+func TestUpstreamRoundTrip(t *testing.T) {
+	_, pool := testCA(t)
+
+	origin := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Origin-Path", r.URL.Path)
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "from the origin")
+	})
+	host, upstream := startOrigin(t, false, origin)
+
+	addr := startProxy(t, func(h *mitm.Handler) {
+		h.SetUpstreamTransport(upstream)
+		h.UseResponse(func(_ context.Context, resp *http.Response) (*http.Response, error) {
+			resp.Header.Set("X-Response-Middleware", "ran")
+			return resp, nil
+		})
+	})
+
+	check := func(t *testing.T, resp *http.Response, body string) {
+		t.Helper()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+		if got := resp.Header.Get("X-Origin-Path"); got != "/index.html" {
+			t.Errorf("X-Origin-Path = %q, the origin was not actually reached", got)
+		}
+		if got := resp.Header.Get("X-Response-Middleware"); got != "ran" {
+			t.Errorf("X-Response-Middleware = %q, the response middleware did not run", got)
+		}
+		if body != "from the origin" {
+			t.Errorf("body = %q, want the origin's body", body)
+		}
+	}
+
+	t.Run("http1.1-client", func(t *testing.T) {
+		conn, _ := dialTunnel(t, addr, host, &tls.Config{RootCAs: pool, ServerName: host})
+		defer conn.Close()
+		br := bufio.NewReader(conn)
+		req, _ := http.NewRequest(http.MethodGet, "https://"+host+"/index.html", nil)
+		if err := req.Write(conn); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+		resp, err := http.ReadResponse(br, req)
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		check(t, resp, string(body))
+	})
+
+	t.Run("h2-client", func(t *testing.T) {
+		client, _ := newHTTP2Client(t, addr, host, pool)
+		resp, err := client.Get("https://" + host + "/index.html")
+		if err != nil {
+			t.Fatalf("h2 request: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.ProtoMajor != 2 {
+			t.Errorf("client proto = %s, want HTTP/2", resp.Proto)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		check(t, resp, string(body))
 	})
 }
