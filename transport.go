@@ -6,8 +6,11 @@ import (
 	"time"
 )
 
+// middlewareTransport runs the request and response middlewares around the
+// handler's upstream round trip. It reads the upstream on each call rather than
+// holding one, so [Handler.SetUpstreamTransport] reaches tunnels that are
+// already open.
 type middlewareTransport struct {
-	base    http.RoundTripper
 	handler *Handler
 }
 
@@ -18,7 +21,7 @@ func (t *middlewareTransport) RoundTrip(req *http.Request) (resp *http.Response,
 		return resp, nil
 	}
 
-	resp, err = t.base.RoundTrip(req)
+	resp, err = t.handler.UpstreamTransport().RoundTrip(req)
 	if err != nil {
 		t.handler.notifyError(req.Context(), req, err)
 		return nil, err

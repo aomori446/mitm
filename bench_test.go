@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -923,4 +924,53 @@ func TestIdleTunnelIsReaped(t *testing.T) {
 			time.Sleep(idle / 4)
 		}
 	})
+}
+
+// TestPlainHTTPUsesUpstreamTransport covers the non-CONNECT path. It used to be
+// wired to http.DefaultTransport, so SetUpstreamTransport silently did nothing
+// for plain HTTP — no proxy chain, no private roots, no test could observe it.
+func TestPlainHTTPUsesUpstreamTransport(t *testing.T) {
+	originHit := false
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originHit = true
+		fmt.Fprint(w, "plain origin")
+	}))
+	defer origin.Close()
+	originAddr := origin.Listener.Addr().String()
+
+	addr := startProxy(t, func(h *mitm.Handler) {
+		h.SetUpstreamTransport(&http.Transport{
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, originAddr)
+			},
+		})
+		h.UseResponse(func(_ context.Context, resp *http.Response) (*http.Response, error) {
+			resp.Header.Set("X-Response-Middleware", "ran")
+			return resp, nil
+		})
+	})
+
+	proxyURL, err := url.Parse("http://" + addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Get("http://elsewhere.example.com/")
+	if err != nil {
+		t.Fatalf("plain HTTP through the proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if !originHit {
+		t.Error("the configured upstream transport was not used")
+	}
+	if string(body) != "plain origin" {
+		t.Errorf("body = %q, want the origin's body", body)
+	}
+	if got := resp.Header.Get("X-Response-Middleware"); got != "ran" {
+		t.Errorf("X-Response-Middleware = %q, middlewares did not run on the plain path", got)
+	}
 }

@@ -97,7 +97,7 @@ func New(certMgr *CertManager) *Handler {
 	}
 	h.httpProxy = &httputil.ReverseProxy{
 		Rewrite:    func(*httputil.ProxyRequest) {},
-		Transport:  &middlewareTransport{base: http.DefaultTransport, handler: h},
+		Transport:  &middlewareTransport{handler: h},
 		BufferPool: copyBuffers,
 	}
 	return h
@@ -117,16 +117,16 @@ func (h *Handler) SetCertManager(certMgr *CertManager) {
 	h.certMgr = certMgr
 }
 
-// UpstreamTransport returns the round tripper used for requests recovered from
-// intercepted tunnels, in a thread-safe manner.
+// UpstreamTransport returns the round tripper used for every proxied request,
+// in a thread-safe manner.
 func (h *Handler) UpstreamTransport() http.RoundTripper {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.upstream
 }
 
-// SetUpstreamTransport replaces the round tripper used for requests recovered
-// from intercepted tunnels, in a thread-safe manner.
+// SetUpstreamTransport replaces the round tripper used for every proxied
+// request, in a thread-safe manner.
 //
 // The default is tuned for a proxy: one pooled transport for every host, with
 // an idle timeout and a ceiling so a long-lived process does not accumulate
@@ -135,7 +135,8 @@ func (h *Handler) UpstreamTransport() http.RoundTripper {
 // upstream traffic in a test. Middlewares still run around whatever is set
 // here; this replaces only the round trip itself.
 //
-// Requests already in flight keep the previous transport.
+// It applies to plain HTTP requests as well as to intercepted tunnels, and
+// takes effect on the next round trip rather than only on new tunnels.
 func (h *Handler) SetUpstreamTransport(rt http.RoundTripper) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -230,14 +230,18 @@ the exact byte count, from which the cost at any link speed follows directly.
       which cannot be a closure because the config is shared. With neither SNI
       nor a target, the handshake now fails with a reason.
 
+- [x] **9 — One upstream for every request** (`transport.go`, `handler.go`,
+      `connect.go`)
+      `h.httpProxy` was wired to `http.DefaultTransport`, so
+      `SetUpstreamTransport` silently did nothing for plain HTTP. And
+      `middlewareTransport` held the transport it was built with, so a change
+      only reached tunnels opened afterwards. It now reads
+      `UpstreamTransport()` per round trip, which fixes both and removes a
+      field. Covered by `TestPlainHTTPUsesUpstreamTransport`.
+
 ## Next
 
 ## Found but not scheduled
-
-- **The plain-HTTP path ignores the upstream transport.** `h.httpProxy` still
-  uses `http.DefaultTransport`, so `SetUpstreamTransport` does not affect
-  non-CONNECT requests. Worth aligning in 5b, once the transport handles plain
-  http:// as well as it handles https.
 
 - **Large bodies do not fill TLS records.** After change 2, a 64 KiB body still
   costs 17 records because `bufio.Writer`'s default buffer is 4096, averaging

@@ -101,10 +101,7 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		return
 	}
 
-	mitmTransport := &middlewareTransport{
-		base:    h.UpstreamTransport(),
-		handler: h,
-	}
+	mitmTransport := &middlewareTransport{handler: h}
 
 	br := bufio.NewReader(tlsDownstream)
 
@@ -201,7 +198,7 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn *tls.Conn, host string) {
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = host
 		},
-		Transport:  &middlewareTransport{base: h.UpstreamTransport(), handler: h},
+		Transport:  &middlewareTransport{handler: h},
 		BufferPool: copyBuffers,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			slog.Error("MITM round trip failed", "error", err)
