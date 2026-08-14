@@ -55,4 +55,3 @@ func DumpResponse(w io.Writer) ResponseFunc {
 func Dump(w io.Writer) (RequestFunc, ResponseFunc) {
 	return DumpRequest(w), DumpResponse(w)
 }
-

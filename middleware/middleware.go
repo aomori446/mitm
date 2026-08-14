@@ -22,4 +22,3 @@ type ErrorFunc = mitm.ErrorFunc
 func Response(status int, contentType string, body io.ReadCloser) *http.Response {
 	return mitm.Response(status, contentType, body)
 }
-

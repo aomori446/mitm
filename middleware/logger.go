@@ -59,4 +59,3 @@ func Logger(log *slog.Logger) (RequestFunc, ResponseFunc) {
 
 	return onReq, onResp
 }
-

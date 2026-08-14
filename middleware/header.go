@@ -40,4 +40,3 @@ func RemoveResponseHeader(key string) ResponseFunc {
 		return resp, nil
 	}
 }
-
