@@ -7,6 +7,9 @@ A Man-in-the-Middle (MITM) HTTP/HTTPS proxy library for Go.
 - Transparent TCP relay or full TLS interception per CONNECT tunnel
 - Unified request/response middleware pipeline for both plain-HTTP and HTTPS traffic
 - Upstream TLS connection pooling with cross-session reuse
+- Per-host certificate forging and caching, signed once however many connections
+  arrive for a host at the same time
+- Certificates for clients that send no SNI, forged for the CONNECT target
 - Built-in middlewares for common use cases
 
 ## Installation
@@ -72,7 +75,12 @@ handler.UseHandshakeError(func(ctx context.Context, host string, err error, d ti
 ```
 
 Middlewares are called in registration order. A non-nil `*http.Response` from a `UseRequest` middleware
-short-circuits the upstream request and sends the response directly to the client.
+short-circuits the upstream request and sends the response directly to the client. `mitm.Response`
+builds one:
+
+```go
+return req, mitm.Response(http.StatusForbidden, "text/plain", io.NopCloser(strings.NewReader("blocked")))
+```
 
 Every request that reaches the upstream is followed by exactly one of the response middlewares or the
 error middlewares, so state keyed on the request can always be released.
@@ -145,7 +153,67 @@ handler.UseResponse(onResp)
 
 Writes each request and response in HTTP/1.1 wire format to the provided writer.
 
+Each body is read into memory in full to be written out and replayed, so a large
+upload or download passing through the proxy is held in memory whole. Scope this
+to the traffic being investigated rather than leaving it on a busy proxy.
+`DumpRequest` and `DumpResponse` are available separately if only one direction
+is wanted.
+
+## Configuration
+
+### Upstream transport
+
+```go
+handler.SetUpstreamTransport(&http.Transport{
+    Proxy:           http.ProxyURL(corporateProxy),
+    TLSClientConfig: &tls.Config{RootCAs: privateRoots},
+})
+```
+
+Replaces the round tripper used for every proxied request: to reach origins
+through another proxy, to trust a private certificate authority, or to observe
+upstream traffic in a test. It applies to plain HTTP as well as to intercepted
+tunnels, and takes effect on the next round trip rather than only on new
+tunnels. Middlewares still run around whatever is set here — this replaces only
+the round trip itself.
+
+The default is tuned for a proxy: one pooled transport for every host, with an
+idle timeout and a ceiling so a long-lived process does not accumulate
+connections it will never use again.
+
+### Tunnel idle timeout
+
+```go
+handler.SetTunnelIdleTimeout(90 * time.Second)
+```
+
+Bounds how long an intercepted tunnel may sit with no request in flight before
+the proxy closes it. It bounds only the wait for the next request; a request
+already arriving, however slowly, is not idle. The default of zero disables the
+bound, which means a client that opens a tunnel and goes quiet holds its
+goroutines and buffers until it disconnects. Only tunnels opened after the call
+are affected.
+
+### Certificate manager
+
+```go
+handler.SetCertManager(newCertMgr)
+```
+
+Swaps the CA in use — for rotating to a freshly generated one without restarting
+the proxy. `handler.CertManager()` reads the current one back. Both are safe to
+call while the proxy is serving.
+
 ## Generating a CA Certificate
+
+`GenerateCA` writes a new CA certificate and key, and is what the `genca`
+example wraps:
+
+```go
+mitm.GenerateCA("testdata/ca.crt", "testdata/ca.key")
+```
+
+Or from the command line:
 
 ```sh
 go run ./examples/genca -cert testdata/ca.crt -key testdata/ca.key
@@ -167,11 +235,12 @@ relay.go       Bidirectional TCP relay for transparent tunnelling
 transport.go   Upstream connection pooling and middleware transport
 middleware/    Middleware types and built-in middlewares
 examples/      Runnable reference implementations
+PERF.md        What the benchmarks measure, and what was measured and left alone
 ```
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.26+
 
 ## License
 
