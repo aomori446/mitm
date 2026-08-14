@@ -177,11 +177,26 @@ the exact byte count, from which the cost at any link speed follows directly.
       h2's memory premium over h1 is now about 4 KiB per request rather than
       36 KiB.
 
-## Next
+- [x] **VPS pass** — whole suite on `sakura`, eight runs. All four tests pass on
+      linux/amd64.
 
-- [ ] **VPS pass** — the changes have settled; run the whole suite on `sakura`
-      per the recipe above and record what the deterministic counters and the
-      steady-state timings look like on one weak core.
+      Every deterministic counter matched the Mac exactly: records/op
+      (7/1/1/17/1/2/10), wireB/op (3016/510/1537/66400/45/1100/65822), upstream
+      dials (40.7 pinned vs 0 over h2), resumption 99.94% against 99.96%.
+      Retention 0.074 B/host against the Mac's 0.33 — both zero in practice.
+
+      The one result the Mac could not have shown: **the upstream h2 fix is
+      worth far more on a weak machine.** Fifty concurrent requests took
+      174.9 ms pinned to http/1.1 against 30.0 ms over h2 — 5.8x, where the M4
+      showed 1.4x. Opening forty TLS connections per iteration is CPU-bound, and
+      one Broadwell core feels that in a way ten M4 cores do not. Steady-state
+      requests are only 1.7x slower on the VPS, and the latency-bound page load
+      is the same on both (188.1 ms vs 191.2 ms over h1), which is the sanity
+      check that the difference really is handshake CPU.
+
+      `TunnelHandshake` wall-clock was again unusable (±177%), as expected.
+
+## Next
 
 ## Found but not scheduled
 
