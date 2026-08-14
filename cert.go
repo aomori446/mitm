@@ -20,6 +20,8 @@ type CertManager struct {
 	caKey       *ecdsa.PrivateKey
 	leafKey     *ecdsa.PrivateKey
 	cachedCerts sync.Map // map[host string]*tls.Certificate
+
+	tlsConfig *tls.Config
 }
 
 func NewCertManager(certFile, keyFile string) (*CertManager, error) {
@@ -48,35 +50,42 @@ func NewCertManager(certFile, keyFile string) (*CertManager, error) {
 		return nil, err
 	}
 	
-	return &CertManager{
+	m := &CertManager{
 		caCert:  caCert,
 		caKey:   caKey,
 		leafKey: leafKey,
-	}, nil
+	}
+	m.tlsConfig = &tls.Config{GetCertificate: m.getCertificate}
+	return m, nil
 }
 
+// TLSConfig returns the [tls.Config] used for every intercepted client
+// connection. The same value is returned on every call, deliberately: a
+// [tls.Config] owns the session ticket keys, so handing out a fresh config per
+// connection leaves every client unable to decrypt the ticket it was issued and
+// forces a full handshake every time. Callers must treat it as read-only.
 func (m *CertManager) TLSConfig() *tls.Config {
-	return &tls.Config{
-		GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			host := info.ServerName
-			
-			if v, ok := m.cachedCerts.Load(host); ok {
-				cert := v.(*tls.Certificate)
-				if time.Now().Add(time.Hour).Before(cert.Leaf.NotAfter) {
-					return cert, nil
-				}
-				m.cachedCerts.Delete(host)
-			}
-			
-			cert, err := m.forgeCert(host)
-			if err != nil {
-				return nil, err
-			}
-			
-			actual, _ := m.cachedCerts.LoadOrStore(host, cert)
-			return actual.(*tls.Certificate), nil
-		},
+	return m.tlsConfig
+}
+
+func (m *CertManager) getCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	host := info.ServerName
+
+	if v, ok := m.cachedCerts.Load(host); ok {
+		cert := v.(*tls.Certificate)
+		if time.Now().Add(time.Hour).Before(cert.Leaf.NotAfter) {
+			return cert, nil
+		}
+		m.cachedCerts.Delete(host)
 	}
+
+	cert, err := m.forgeCert(host)
+	if err != nil {
+		return nil, err
+	}
+
+	actual, _ := m.cachedCerts.LoadOrStore(host, cert)
+	return actual.(*tls.Certificate), nil
 }
 
 func (m *CertManager) forgeCert(host string) (*tls.Certificate, error) {
