@@ -1,7 +1,6 @@
 package mitm
 
 import (
-	"crypto/tls"
 	"net"
 	"net/http"
 	"time"
@@ -18,13 +17,13 @@ func (t *middlewareTransport) RoundTrip(req *http.Request) (resp *http.Response,
 	if resp != nil {
 		return resp, nil
 	}
-	
+
 	resp, err = t.base.RoundTrip(req)
 	if err != nil {
 		t.handler.notifyError(req.Context(), req, err)
 		return nil, err
 	}
-	
+
 	return t.handler.runResponseMiddlewares(resp)
 }
 
@@ -36,12 +35,19 @@ func (t *middlewareTransport) RoundTrip(req *http.Request) (resp *http.Response,
 // never gets back.
 func newUpstreamTransport() *http.Transport {
 	return &http.Transport{
-		DialTLSContext: (&tls.Dialer{
-			NetDialer: &net.Dialer{Timeout: 10 * time.Second},
-			Config: &tls.Config{
-				NextProtos: []string{"http/1.1"},
-			},
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
 		}).DialContext,
+
+		// Let ALPN decide the upstream protocol instead of pinning http/1.1.
+		// An origin that speaks h2 then carries every concurrent request for
+		// that host on one connection, rather than one connection per request
+		// in flight. ForceAttemptHTTP2 is required because [http.Transport]
+		// stops negotiating h2 on its own as soon as a dial function is set.
+		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: 10 * time.Second,
+
 		DisableCompression:    true,
 		ResponseHeaderTimeout: 30 * time.Second,
 

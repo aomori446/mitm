@@ -620,24 +620,129 @@ func TestProtocolNegotiation(t *testing.T) {
 // the origin's own certificate and sends every host to it, so the proxy dials
 // "example.com:443" and lands on the local server.
 func startOrigin(tb testing.TB, enableHTTP2 bool, handler http.Handler) (string, *http.Transport) {
+	host, addr, pool := startOriginRaw(tb, enableHTTP2, handler)
+	return host, upstreamVia(addr, pool, false, nil)
+}
+
+// startOriginRaw is startOrigin without the transport, for callers that need to
+// build their own.
+func startOriginRaw(tb testing.TB, enableHTTP2 bool, handler http.Handler) (host, addr string, pool *x509.CertPool) {
 	tb.Helper()
 	srv := httptest.NewUnstartedServer(handler)
 	srv.EnableHTTP2 = enableHTTP2
 	srv.StartTLS()
 	tb.Cleanup(srv.Close)
 
-	pool := x509.NewCertPool()
+	pool = x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
-	addr := srv.Listener.Addr().String()
+	// httptest's certificate is issued for example.com, so the proxy's own
+	// verification of the origin stays real; only the address is redirected.
+	return "example.com", srv.Listener.Addr().String(), pool
+}
 
-	return "example.com", &http.Transport{
-		// httptest's certificate is issued for example.com, so the proxy's own
-		// verification of the origin stays real; only the address is redirected.
-		TLSClientConfig:   &tls.Config{RootCAs: pool},
-		ForceAttemptHTTP2: enableHTTP2,
+// upstreamVia builds an upstream transport aimed at addr. pinHTTP1 reproduces
+// the shape the proxy shipped before ALPN was allowed to choose: TLS dialled by
+// hand with only http/1.1 offered. dials, when non-nil, counts TCP connections
+// opened to the origin — the number that says whether requests shared a
+// connection or each got their own.
+func upstreamVia(addr string, pool *x509.CertPool, pinHTTP1 bool, dials *atomic.Int64) *http.Transport {
+	dial := func(ctx context.Context, network string) (net.Conn, error) {
+		if dials != nil {
+			dials.Add(1)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+
+	if pinHTTP1 {
+		return &http.Transport{
+			DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				raw, err := dial(ctx, network)
+				if err != nil {
+					return nil, err
+				}
+				conn := tls.Client(raw, &tls.Config{
+					RootCAs:    pool,
+					ServerName: "example.com",
+					NextProtos: []string{"http/1.1"},
+				})
+				if err := conn.HandshakeContext(ctx); err != nil {
+					raw.Close()
+					return nil, err
+				}
+				return conn, nil
+			},
+			DisableCompression:  true,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		}
+	}
+
+	return &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
+			return dial(ctx, network)
 		},
+		TLSClientConfig:     &tls.Config{RootCAs: pool, ServerName: "example.com"},
+		ForceAttemptHTTP2:   true,
+		DisableCompression:  true,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+}
+
+// -------------------------------------------------------------- benchmark: E
+
+// BenchmarkUpstreamProtocol compares pinning the upstream to http/1.1 against
+// letting ALPN pick, against an origin that offers h2. The client side is held
+// constant — one h2 tunnel issuing every request at once — so the only variable
+// is how the proxy talks to the origin.
+//
+// The reported dial count is the deterministic half: over http/1.1 concurrent
+// requests to one host each need their own connection, whereas over h2 they
+// share one.
+func BenchmarkUpstreamProtocol(b *testing.B) {
+	const (
+		concurrency   = 50
+		originLatency = 20 * time.Millisecond
+	)
+	_, pool := testCA(b)
+
+	origin := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(originLatency)
+		fmt.Fprint(w, "ok")
+	})
+	host, addr, originPool := startOriginRaw(b, true, origin)
+
+	for _, pinned := range []bool{true, false} {
+		name := "upstream=h2-via-alpn"
+		if pinned {
+			name = "upstream=pinned-http1.1"
+		}
+		b.Run(name, func(b *testing.B) {
+			var dials atomic.Int64
+			proxyAddr := startProxy(b, func(h *mitm.Handler) {
+				h.SetUpstreamTransport(upstreamVia(addr, originPool, pinned, &dials))
+			})
+			client, _ := newHTTP2Client(b, proxyAddr, host, pool)
+			getOnce(b, client, host)
+
+			dials.Store(0)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				var wg sync.WaitGroup
+				wg.Add(concurrency)
+				for range concurrency {
+					go func() {
+						defer wg.Done()
+						getOnce(b, client, host)
+					}()
+				}
+				wg.Wait()
+			}
+			b.StopTimer()
+
+			b.ReportMetric(float64(dials.Load())/float64(b.N), "upstreamDials/op")
+		})
 	}
 }
 

@@ -112,8 +112,6 @@ the exact byte count, from which the cost at any link speed follows directly.
       is 5.5 MB retained versus none. The guard tests failed before the change
       and pass after.
 
-## Next
-
 - [x] **4 — HTTP/2 on the client side** (`cert.go`, `connect.go`)
       The proxy forced every site down to HTTP/1.1 even when the client spoke
       h2. Now the forged config offers `["h2", "http/1.1"]`, and a tunnel that
@@ -134,7 +132,7 @@ the exact byte count, from which the cost at any link speed follows directly.
       the first to show a response middleware running on a response the proxy
       did not invent — over both the h1 and h2 client paths.
 
-- [ ] **5b — HTTP/2 upstream** (`transport.go`) ← next
+- [x] **5b — HTTP/2 upstream** (`transport.go`)
       `newUpstreamTransport` still pins `NextProtos: ["http/1.1"]` on the
       upstream dial, so the proxy opens a separate h1 connection per concurrent
       request even when the origin offers h2. Dropping the pin needs
@@ -143,13 +141,22 @@ the exact byte count, from which the cost at any link speed follows directly.
       `DialTLSContext` entirely in favour of `DialContext` + `TLSClientConfig`,
       which also makes `TLSHandshakeTimeout` apply — it does not today.
 
-      Now measurable: `startOrigin` in `bench_test.go` runs a trusted TLS origin
-      (optionally h2) and hands back a transport to install with
-      `SetUpstreamTransport`. A benchmark for 5b wants concurrent requests
-      against an h2-capable origin with realistic latency, comparing upstream
-      connection counts and wall time against the h1 pin.
+      Dropped `DialTLSContext` for `DialContext` + `TLSClientConfig` +
+      `ForceAttemptHTTP2` (needed, because `http.Transport` stops negotiating h2
+      by itself once a dial function is set). `TLSHandshakeTimeout` now applies;
+      it did not before.
 
-- [ ] **6 — Tune the h2 server's buffers** (`connect.go`)
+      `BenchmarkUpstreamProtocol`, 50 concurrent requests at 20 ms origin
+      latency, client side held constant at one h2 tunnel:
+
+        upstream dials per op   40.1 -> 0     (one connection, reused)
+        wall time              33.79ms -> 23.65ms (-30.0%)
+        allocations            43.0k -> 7.8k  (-82.0%)
+        memory                 7.89MiB -> 2.38MiB (-69.8%)
+
+## Next
+
+- [ ] **6 — Tune the h2 server's buffers** (`connect.go`) ← next
       h2 costs 45.9 KiB/op against h1's 9.6 KiB/op, and a page load allocates
       2.56 MiB against 492 KiB. `http2.Server`'s
       `MaxUploadBufferPerConnection` and `MaxUploadBufferPerStream` default to
