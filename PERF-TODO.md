@@ -154,13 +154,34 @@ the exact byte count, from which the cost at any link speed follows directly.
         allocations            43.0k -> 7.8k  (-82.0%)
         memory                 7.89MiB -> 2.38MiB (-69.8%)
 
+- [x] **6 — Pool the reverse proxy's copy buffers** (`handler.go`, `connect.go`)
+      The hypothesis recorded here was wrong, and worth recording as wrong: the
+      memory was not `http2.Server`'s `MaxUploadBufferPerConnection` /
+      `MaxUploadBufferPerStream`. Those are flow-control window sizes, not
+      preallocated buffers, and tuning them would have changed nothing.
+
+      An alloc profile put 67% of h2 allocations in
+      `httputil.ReverseProxy.copyBuffer`: with no `BufferPool` set, ReverseProxy
+      allocates a fresh 32 KiB copy buffer for **every response**. Introduced by
+      change 4 on the h2 path, and present in `h.httpProxy` since long before
+      this pass. Both now share one `sync.Pool`.
+
+      Interleaved A/B, eight rounds per side:
+
+        h2 request, per op        45.89KiB -> 13.79KiB  (-69.9%)
+        page load (h2)             2634KiB ->   758KiB  (-71.2%)
+        upstream fanout (h2)       2556KiB ->   855KiB  (-66.6%)
+        upstream fanout (h1 pin)  8.11MiB  ->  6.78MiB  (-16.4%)
+        h2 request wall time        80.3us ->   76.8us  (-4.3%)
+
+      h2's memory premium over h1 is now about 4 KiB per request rather than
+      36 KiB.
+
 ## Next
 
-- [ ] **6 — Tune the h2 server's buffers** (`connect.go`) ← next
-      h2 costs 45.9 KiB/op against h1's 9.6 KiB/op, and a page load allocates
-      2.56 MiB against 492 KiB. `http2.Server`'s
-      `MaxUploadBufferPerConnection` and `MaxUploadBufferPerStream` default to
-      1 MB each. Worth measuring before picking numbers.
+- [ ] **VPS pass** — the changes have settled; run the whole suite on `sakura`
+      per the recipe above and record what the deterministic counters and the
+      steady-state timings look like on one weak core.
 
 ## Found but not scheduled
 

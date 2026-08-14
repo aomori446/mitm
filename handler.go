@@ -43,6 +43,23 @@ func Response(status int, contentType string, body io.ReadCloser) *http.Response
 	}
 }
 
+// copyBuffers recycles the buffers [httputil.ReverseProxy] uses to copy
+// response bodies. Left unset, ReverseProxy allocates a fresh 32 KiB buffer for
+// every single response, which on a proxy is the largest allocation per
+// request by a wide margin.
+var copyBuffers = &bufferPool{
+	pool: sync.Pool{New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	}},
+}
+
+type bufferPool struct{ pool sync.Pool }
+
+func (b *bufferPool) Get() []byte { return *b.pool.Get().(*[]byte) }
+
+func (b *bufferPool) Put(buf []byte) { b.pool.Put(&buf) }
+
 // Handler is an [http.Handler] that acts as a forward proxy and performs
 // TLS interception (MITM) on CONNECT tunnels when a [CertManager] is provided.
 type Handler struct {
@@ -72,8 +89,9 @@ func New(certMgr *CertManager) *Handler {
 		upstream: newUpstreamTransport(),
 	}
 	h.httpProxy = &httputil.ReverseProxy{
-		Rewrite:   func(*httputil.ProxyRequest) {},
-		Transport: &middlewareTransport{base: http.DefaultTransport, handler: h},
+		Rewrite:    func(*httputil.ProxyRequest) {},
+		Transport:  &middlewareTransport{base: http.DefaultTransport, handler: h},
+		BufferPool: copyBuffers,
 	}
 	return h
 }
