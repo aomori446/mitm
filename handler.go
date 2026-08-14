@@ -75,7 +75,13 @@ type Handler struct {
 	handshakeErrorMiddlewares []HandshakeErrorFunc
 
 	upstream http.RoundTripper
+
+	tunnelIdleTimeout time.Duration
 }
+
+// DefaultTunnelIdleTimeout bounds how long an intercepted tunnel may sit with
+// no request in flight before the proxy closes it.
+const DefaultTunnelIdleTimeout = 90 * time.Second
 
 // New creates a Handler. Providing a non-nil certMgr enables TLS interception;
 // passing nil falls back to a transparent TCP relay for CONNECT tunnels.
@@ -85,8 +91,9 @@ type Handler struct {
 // promptly when the server stops.
 func New(certMgr *CertManager) *Handler {
 	h := &Handler{
-		certMgr:  certMgr,
-		upstream: newUpstreamTransport(),
+		certMgr:           certMgr,
+		upstream:          newUpstreamTransport(),
+		tunnelIdleTimeout: DefaultTunnelIdleTimeout,
 	}
 	h.httpProxy = &httputil.ReverseProxy{
 		Rewrite:    func(*httputil.ProxyRequest) {},
@@ -133,6 +140,27 @@ func (h *Handler) SetUpstreamTransport(rt http.RoundTripper) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.upstream = rt
+}
+
+// TunnelIdleTimeout returns how long an intercepted tunnel may sit idle, in a
+// thread-safe manner.
+func (h *Handler) TunnelIdleTimeout() time.Duration {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.tunnelIdleTimeout
+}
+
+// SetTunnelIdleTimeout bounds how long an intercepted tunnel may sit with no
+// request in flight before the proxy closes it. It bounds only the wait for the
+// next request; a request already arriving, however slowly, is not idle.
+//
+// Zero disables the bound, which means a client that opens a tunnel and goes
+// quiet holds its goroutines and buffers until it disconnects. Only tunnels
+// opened after the call are affected.
+func (h *Handler) SetTunnelIdleTimeout(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tunnelIdleTimeout = d
 }
 
 // UseRequest registers fn as a request middleware.

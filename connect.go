@@ -74,12 +74,15 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 	}
 	defer tlsDownstream.Close()
 
+	// Tear the tunnel down on shutdown by closing it, not by nudging a read
+	// deadline: the loop below sets deadlines of its own, and a deadline set
+	// here could be overwritten by one set there. A close cannot be undone.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		select {
 		case <-ctx.Done():
-			tlsDownstream.SetReadDeadline(time.Now())
+			tlsDownstream.Close()
 		case <-done:
 		}
 	}()
@@ -104,11 +107,23 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 	// larger than the buffer still pass straight through, so this does not
 	// break up the big copies.
 	bw := bufio.NewWriter(tlsDownstream)
+	idle := h.TunnelIdleTimeout()
 	for {
+		// Bound the wait for the next request, not the request itself. Without
+		// this the loop returns only on error or close, so a client that opens
+		// a keep-alive tunnel and then goes quiet pins two goroutines and the
+		// connection's buffers for as long as it stays connected.
+		if idle > 0 {
+			tlsDownstream.SetReadDeadline(time.Now().Add(idle))
+		}
+
 		req, err := http.ReadRequest(br)
 		if err != nil {
 			break
 		}
+
+		// The request is arriving; a slow body is not an idle tunnel.
+		tlsDownstream.SetReadDeadline(time.Time{})
 
 		req.URL.Scheme = "https"
 		req.URL.Host = host
@@ -185,10 +200,10 @@ func (h *Handler) serveHTTP2(ctx context.Context, conn *tls.Conn, host string) {
 		},
 	}
 
-	// ServeConn returns when the connection ends. Cancellation is already
-	// wired: the caller's watcher sets a read deadline on ctx.Done, which
-	// fails the next frame read and unwinds this.
-	(&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{
+	// ServeConn returns when the connection ends: on shutdown because the
+	// caller's watcher closes it, or on its own once IdleTimeout passes with no
+	// open streams.
+	(&http2.Server{IdleTimeout: h.TunnelIdleTimeout()}).ServeConn(conn, &http2.ServeConnOpts{
 		Context: ctx,
 		Handler: proxy,
 	})

@@ -196,6 +196,26 @@ the exact byte count, from which the cost at any link speed follows directly.
 
       `TunnelHandshake` wall-clock was again unusable (±177%), as expected.
 
+- [x] **7 — Bound how long a tunnel may sit idle** (`connect.go`, `handler.go`)
+      The HTTP/1.1 loop exited only on error or close, so a client that opened a
+      keep-alive tunnel and went quiet held it for as long as it stayed
+      connected. Measured cost of one such tunnel: **1.9 goroutines and 19 KB**,
+      held indefinitely.
+
+      A read deadline now bounds the wait for the next request — and only that
+      wait; it is cleared once a request starts arriving, so a slow body is not
+      mistaken for an idle tunnel. `http2.Server` gets the same bound via its
+      own `IdleTimeout`. Default 90s, `SetTunnelIdleTimeout` to change it, zero
+      to disable.
+
+      The shutdown watcher now closes the connection instead of setting a read
+      deadline of its own. Two pieces of code setting deadlines on one
+      connection is a race the loop would win; a close cannot be undone.
+
+      `TestIdleTunnelIsReaped` covers both directions: a quiet tunnel is closed
+      (at 0.21s against the 200ms bound set for the test, so it is the timeout
+      doing it), and a tunnel still being used survives five times that.
+
 ## Next
 
 ## Found but not scheduled
@@ -204,11 +224,6 @@ the exact byte count, from which the cost at any link speed follows directly.
   uses `http.DefaultTransport`, so `SetUpstreamTransport` does not affect
   non-CONNECT requests. Worth aligning in 5b, once the transport handles plain
   http:// as well as it handles https.
-
-- **Idle tunnels are never timed out** (`connect.go`, the `ReadRequest` loop).
-  Exits only on error or close, so an idle keep-alive tunnel holds two
-  goroutines, a `bufio.Reader`/`Writer` and a `tls.Conn`'s buffers (~32 KB+)
-  indefinitely. Wants a `SetReadDeadline` per iteration.
 
 - **Large bodies do not fill TLS records.** After change 2, a 64 KiB body still
   costs 17 records because `bufio.Writer`'s default buffer is 4096, averaging

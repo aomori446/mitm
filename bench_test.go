@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -258,7 +261,7 @@ func dialTunnel(tb testing.TB, proxyAddr, host string, cfg *tls.Config) (*tls.Co
 
 // newHTTP2Client returns a client whose single h2 connection runs inside a
 // CONNECT tunnel, plus the record counter for that tunnel.
-func newHTTP2Client(tb testing.TB, proxyAddr, host string, pool *x509.CertPool) (*http.Client, func() *recordCounter) {
+func newHTTP2Client(tb testing.TB, proxyAddr, host string, pool *x509.CertPool) (*http.Client, func() []*recordCounter) {
 	tb.Helper()
 	var mu sync.Mutex
 	var counters []*recordCounter
@@ -287,15 +290,23 @@ func newHTTP2Client(tb testing.TB, proxyAddr, host string, pool *x509.CertPool) 
 	}
 	tb.Cleanup(tr.CloseIdleConnections)
 
-	sum := func() *recordCounter {
+	all := func() []*recordCounter {
 		mu.Lock()
 		defer mu.Unlock()
-		if len(counters) != 1 {
-			tb.Fatalf("expected exactly one h2 connection, got %d", len(counters))
-		}
-		return counters[0]
+		return slices.Clone(counters)
 	}
-	return &http.Client{Transport: tr}, sum
+	return &http.Client{Transport: tr}, all
+}
+
+// soleCounter asserts that every request so far shared one h2 connection, and
+// returns its counter.
+func soleCounter(tb testing.TB, all func() []*recordCounter) *recordCounter {
+	tb.Helper()
+	cs := all()
+	if len(cs) != 1 {
+		tb.Fatalf("expected exactly one h2 connection, got %d", len(cs))
+	}
+	return cs[0]
 }
 
 // getOnce issues one request through client and drains the response.
@@ -455,7 +466,7 @@ func BenchmarkTunnelRequestHTTP2(b *testing.B) {
 			// and seeds the HPACK table that later requests index into.
 			getOnce(b, client, host)
 
-			c := counter()
+			c := soleCounter(b, counter)
 			c.reset()
 			b.SetBytes(int64(size))
 			b.ReportAllocs()
@@ -604,7 +615,7 @@ func TestProtocolNegotiation(t *testing.T) {
 		if len(body) != 1024 {
 			t.Errorf("body = %d bytes, want 1024", len(body))
 		}
-		counter() // asserts exactly one h2 connection carried all of it
+		soleCounter(t, counter) // all of it rode one h2 connection
 	})
 }
 
@@ -813,5 +824,103 @@ func TestUpstreamRoundTrip(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		check(t, resp, string(body))
+	})
+}
+
+// ------------------------------------------------------------- idle tunnels
+
+// idleTunnels is how many quiet tunnels a measurement holds open at once. A
+// browser leaves a handful per origin behind after a page settles; a proxy with
+// real users accumulates them from every client at once.
+const idleTunnels = 100
+
+// BenchmarkIdleTunnelCost measures what one tunnel costs the proxy while it
+// sits with no request in flight. With no idle bound that cost is held for as
+// long as the client stays connected, however long that is, so this is the
+// figure the idle timeout reclaims.
+func BenchmarkIdleTunnelCost(b *testing.B) {
+	const host = "bench.example.com"
+	_, pool := testCA(b)
+	addr := startProxy(b, func(h *mitm.Handler) {
+		h.SetTunnelIdleTimeout(0) // hold them open, so the cost can be seen
+		h.UseRequest(syntheticResponder(0, 0))
+	})
+	cfg := &tls.Config{RootCAs: pool, ServerName: host, NextProtos: []string{"http/1.1"}}
+
+	for b.Loop() {
+		b.StopTimer()
+		runtime.GC()
+		before := runtime.NumGoroutine()
+		var m0 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		b.StartTimer()
+
+		conns := make([]*tls.Conn, idleTunnels)
+		for i := range conns {
+			conns[i], _ = dialTunnel(b, addr, host, cfg)
+			exchange(b, conns[i], bufio.NewReader(conns[i]), host)
+		}
+
+		b.StopTimer()
+		// Let the proxy's per-tunnel goroutines settle before counting them.
+		time.Sleep(100 * time.Millisecond)
+		runtime.GC()
+		after := runtime.NumGoroutine()
+		var m1 runtime.MemStats
+		runtime.ReadMemStats(&m1)
+
+		b.ReportMetric(float64(after-before)/idleTunnels, "goroutines/tunnel")
+		b.ReportMetric((float64(m1.HeapAlloc)-float64(m0.HeapAlloc))/idleTunnels, "retainedB/tunnel")
+
+		for _, c := range conns {
+			c.Close()
+		}
+		b.StartTimer()
+	}
+}
+
+// TestIdleTunnelIsReaped checks that a tunnel which stops asking for anything
+// is closed rather than held. The bound applies to the wait for the next
+// request only, so a tunnel still being used must survive it.
+func TestIdleTunnelIsReaped(t *testing.T) {
+	const (
+		host = "bench.example.com"
+		idle = 200 * time.Millisecond
+	)
+	_, pool := testCA(t)
+	addr := startProxy(t, func(h *mitm.Handler) {
+		h.SetTunnelIdleTimeout(idle)
+		h.UseRequest(syntheticResponder(0, 0))
+	})
+
+	t.Run("quiet-tunnel-is-closed", func(t *testing.T) {
+		conn, _ := dialTunnel(t, addr, host, &tls.Config{RootCAs: pool, ServerName: host})
+		defer conn.Close()
+		br := bufio.NewReader(conn)
+		exchange(t, conn, br, host)
+
+		conn.SetReadDeadline(time.Now().Add(10 * idle))
+		_, err := br.Peek(1)
+		switch {
+		case err == nil:
+			t.Fatal("proxy sent data on an idle tunnel instead of closing it")
+		case errors.Is(err, os.ErrDeadlineExceeded):
+			t.Fatalf("tunnel still open %v after the %v idle timeout", 10*idle, idle)
+		}
+	})
+
+	t.Run("busy-tunnel-survives", func(t *testing.T) {
+		conn, _ := dialTunnel(t, addr, host, &tls.Config{RootCAs: pool, ServerName: host})
+		defer conn.Close()
+		br := bufio.NewReader(conn)
+		// Keep asking for longer than the idle bound: each request restarts it.
+		deadline := time.Now().Add(5 * idle)
+		for n := 0; time.Now().Before(deadline); n++ {
+			resp := exchange(t, conn, br, host)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("request %d: status %d", n, resp.StatusCode)
+			}
+			time.Sleep(idle / 4)
+		}
 	})
 }
