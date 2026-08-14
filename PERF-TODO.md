@@ -250,14 +250,12 @@ the exact byte count, from which the cost at any link speed follows directly.
   of memory per tunnel, which fights the idle-tunnel item above. Deliberately
   skipped. Note h2 already does better here: 10 records for the same body.
 
-- **Middleware slices are read under `RLock` twice per request**
-  (`handler.go:183`, `handler.go:197`). Tiny, but registration is a startup-time
-  activity — `atomic.Pointer[[]RequestFunc]` would remove the contention
-  entirely.
-
-- **`DumpRequest`/`DumpResponse` read the whole body into memory**
-  (`middleware/dump.go`). Documented as debug-only; worth saying in the doc
-  comment that large uploads will blow up.
+- **The handler mutex was measured and left alone.** A mutex profile of fifty
+  concurrent h2 streams put `middlewareTransport.RoundTrip` at 4.88 ms of
+  603.85 ms of total delay — 0.81%. The contention that does exist is
+  `bufio.(*Writer).Flush` inside the h2 framer (23.7%). Replacing the RWMutex
+  reads with a copy-on-write snapshot would mean restructuring all of the
+  handler's mutable state for under 1% of an already small cost. Not worth it.
 
 - **`DisableCompression: true` is correct, not a bug** (`transport.go:41`). It
   only stops Go adding its own `Accept-Encoding`; the client's own header is

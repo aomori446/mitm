@@ -11,6 +11,10 @@ import (
 
 // DumpRequest returns a [RequestFunc] that writes each request in HTTP/1.1
 // wire format (including body) to w. Intended for debugging.
+//
+// The whole body is read into memory to be written out and then replayed, so a
+// large upload passing through the proxy is held in memory in full. Scope this
+// to the traffic being investigated rather than leaving it on a busy proxy.
 func DumpRequest(w io.Writer) RequestFunc {
 	var mu sync.Mutex
 	return func(ctx context.Context, req *http.Request) (*http.Request, *http.Response) {
@@ -27,6 +31,9 @@ func DumpRequest(w io.Writer) RequestFunc {
 
 // DumpResponse returns a [ResponseFunc] that writes each response in
 // HTTP/1.1 wire format (including body) to w. Intended for debugging.
+//
+// The whole body is read into memory, so a large download is held in memory in
+// full. Scope this to the traffic being investigated.
 func DumpResponse(w io.Writer) ResponseFunc {
 	var mu sync.Mutex
 	return func(ctx context.Context, resp *http.Response) (*http.Response, error) {
@@ -43,7 +50,8 @@ func DumpResponse(w io.Writer) ResponseFunc {
 
 // Dump returns a pair of middlewares that write each request and response in
 // HTTP/1.1 wire format to w. It is a shorthand for calling [DumpRequest]
-// and [DumpResponse] with the same writer.
+// and [DumpResponse] with the same writer, and carries the same memory cost:
+// every body passing through the proxy is buffered in full.
 func Dump(w io.Writer) (RequestFunc, ResponseFunc) {
 	return DumpRequest(w), DumpResponse(w)
 }
