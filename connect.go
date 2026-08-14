@@ -87,6 +87,15 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 	}
 	
 	br := bufio.NewReader(tlsDownstream)
+
+	// Buffer the write side. [http.Response.Write] emits the status line and
+	// each header field as several small Writes, and every Write on a
+	// [tls.Conn] becomes its own TLS record, with its own header, MAC and
+	// syscall. Unbuffered, a plain response with a dozen headers costs about
+	// fifty records and close to three times its own size on the wire. Bodies
+	// larger than the buffer still pass straight through, so this does not
+	// break up the big copies.
+	bw := bufio.NewWriter(tlsDownstream)
 	for {
 		req, err := http.ReadRequest(br)
 		if err != nil {
@@ -101,12 +110,16 @@ func (h *Handler) handleCONNECTWithMITM(ctx context.Context, downstream net.Conn
 		if err != nil {
 			slog.Error("MITM round trip failed", "error", err)
 			errResp := Response(http.StatusBadGateway, "", http.NoBody)
-			errResp.Write(tlsDownstream)
+			errResp.Write(bw)
+			bw.Flush()
 			break
 		}
 		
-		err = resp.Write(tlsDownstream)
+		err = resp.Write(bw)
 		resp.Body.Close()
+		if err == nil {
+			err = bw.Flush()
+		}
 		if err != nil {
 			break
 		}
