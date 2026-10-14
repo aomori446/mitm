@@ -3,8 +3,8 @@
 //
 // Usage:
 //
-//	go run ./cmd/genca                        # writes testdata/ca.crt and testdata/ca.key
-//	go run ./cmd/genca -cert my.crt -key my.key
+//	go run ./examples/genca                       # writes testdata/ca.crt and testdata/ca.key
+//	go run ./examples/genca -cert my.crt -key my.key
 package main
 
 import (

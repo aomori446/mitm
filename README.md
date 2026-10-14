@@ -1,6 +1,15 @@
 # mitm
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/aomori446/mitm.svg)](https://pkg.go.dev/github.com/aomori446/mitm)
+[![CI](https://github.com/aomori446/mitm/actions/workflows/ci.yml/badge.svg)](https://github.com/aomori446/mitm/actions/workflows/ci.yml)
+
 A Man-in-the-Middle (MITM) HTTP/HTTPS proxy library for Go.
+
+## Use Cases
+
+- Debugging HTTP/HTTPS APIs: see exactly what an app sends and receives
+- Rewriting requests and responses to test edge cases and error handling
+- Mocking or blocking upstream services during development
 
 ## Features
 
@@ -20,11 +29,20 @@ go get github.com/aomori446/mitm
 
 ## Quick Start
 
+Generate a CA certificate and key once (see [Generating a CA Certificate](#generating-a-ca-certificate)):
+
+```sh
+go run github.com/aomori446/mitm/examples/genca@latest -cert testdata/ca.crt -key testdata/ca.key
+```
+
+Then start the proxy:
+
 ```go
 package main
 
 import (
     "context"
+    "log"
     "os"
     "os/signal"
     "syscall"
@@ -36,12 +54,17 @@ func main() {
     ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
     defer stop()
 
-    certMgr, _ := mitm.NewCertManager("testdata/ca.crt", "testdata/ca.key")
+    certMgr, err := mitm.NewCertManager("testdata/ca.crt", "testdata/ca.key")
+    if err != nil {
+        log.Fatal(err)
+    }
 
     handler := mitm.New(certMgr)
 
     // Starts proxy server with built-in graceful shutdown on ctx cancellation
-    handler.ListenAndServe(ctx, ":8080")
+    if err := handler.ListenAndServe(ctx, ":8080"); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -237,6 +260,13 @@ middleware/    Middleware types and built-in middlewares
 examples/      Runnable reference implementations
 PERF.md        What the benchmarks measure, and what was measured and left alone
 ```
+
+## Security Note
+
+The generated CA can sign a certificate for any host, so anyone holding
+`ca.key` can impersonate any site to a machine that trusts the CA. Keep the key
+private, trust the CA only on machines you control, and remove it from the trust
+store when you are done. Only intercept traffic you are authorized to inspect.
 
 ## Requirements
 
