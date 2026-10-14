@@ -2,6 +2,9 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/aomori446/mitm.svg)](https://pkg.go.dev/github.com/aomori446/mitm)
 [![CI](https://github.com/aomori446/mitm/actions/workflows/ci.yml/badge.svg)](https://github.com/aomori446/mitm/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/aomori446/mitm)](https://github.com/aomori446/mitm/blob/main/go.mod)
+[![Latest Tag](https://img.shields.io/github/v/tag/aomori446/mitm?sort=semver)](https://github.com/aomori446/mitm/tags)
+[![License](https://img.shields.io/github/license/aomori446/mitm)](https://github.com/aomori446/mitm/blob/main/LICENSE)
 
 A Man-in-the-Middle (MITM) HTTP/HTTPS proxy library for Go.
 
